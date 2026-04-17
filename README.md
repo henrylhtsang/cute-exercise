@@ -23,3 +23,5 @@ subdirectory contains:
 ## Exercises
 
 1. [How bad is a `for` loop in CuTe DSL?](cute_exercise/for_loop/)
+2. [Load global → smem → rmem, op, store back — or straight to rmem?](cute_exercise/load_path/)
+3. [TMA load → elementwise add → TMA store, no warp spec. Faster than sync copy?](cute_exercise/tma_no_warpspec/)
