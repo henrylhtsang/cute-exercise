@@ -18,12 +18,18 @@ Some angles:
 
 | variant | fp16 | fp32 |
 |---|---:|---:|
-| `torch.add` (baseline) | 115 us / 6987 GB/s | 228 us / 7077 GB/s |
-| `vectorized` (fragment `.load()`) | 117 us / 6863 GB/s | 230 us / 7014 GB/s |
-| `for_loop` (per-element Python `for`) | 359 us / 2243 GB/s | 358 us / 4499 GB/s |
+| `torch.add` (baseline) | 115 us / 6996 GB/s | 228 us / 7075 GB/s |
+| `vectorized` (fragment `.load()`) | 117 us / 6858 GB/s | 230 us / 7012 GB/s |
+| `vec_ld_scalar_add` (wide ld/st, scalar `for` for the add) | 117 us / 6874 GB/s | 230 us / 7013 GB/s |
+| `for_loop` (per-element `thrA[i] + thrB[i]` over global) | 360 us / 2238 GB/s | 357 us / 4515 GB/s |
 
 Vectorized matches `torch.add` within ~2%. Plain `for i: thrC[i] = thrA[i] +
 thrB[i]` drops to ~32% (fp16) / ~64% (fp32) of peak.
+
+`vec_ld_scalar_add` is the interesting middle ground: vectorized loads into
+register fragments via `.load()`, then a scalar Python `for` over the register
+fragment for the add, then a vectorized store. It matches `vectorized` exactly
+— the damage from a `for` loop is entirely at the memory level, not compute.
 
 ## Why the `for` loop is slow — coalescing at the same instant
 
@@ -59,12 +65,13 @@ Dumped with `python dump_asm.py`, which sets `CUTE_DSL_KEEP_PTX=1` /
 `CUTE_DSL_KEEP_CUBIN=1` and disassembles the cubin with `nvdisasm` against
 `sm_100a`.
 
-| variant | dtype | PTX loads | SASS loads | SASS stores | SASS insn count |
-|---|---|---|---|---|---:|
-| `vectorized` | fp16 | 32 × `ld.global.v4.b32` | 32 × `LDG.E.128` | 16 × `STG.E.128` | 236 |
-| `vectorized` | fp32 | 32 × `ld.global.v4.b32` | 32 × `LDG.E.128` | 16 × `STG.E.128` | 236 |
-| `for_loop` | fp16 | 256 × `ld.global.b16` | 256 × `LDG.E.U16` | 128 × `STG.E.U16` | 756 |
-| `for_loop` | fp32 | 128 × `ld.global.b32` | 128 × `LDG.E` (32b) | 64 × `STG.E` | 380 |
+| variant | dtype | PTX loads | PTX adds | SASS loads | SASS stores | SASS insn |
+|---|---|---|---|---|---|---:|
+| `vectorized` | fp16 | 32 × `ld.global.v4.b32` | 64 × `add.f16x2` | 32 × `LDG.E.128` | 16 × `STG.E.128` | 236 |
+| `vec_ld_scalar_add` | fp16 | 32 × `ld.global.v4.b32` | 128 × `add.f16` | 32 × `LDG.E.128` | 16 × `STG.E.128` | 236 |
+| `for_loop` | fp16 | 256 × `ld.global.b16` | 128 × `add.f16` | 256 × `LDG.E.U16` | 128 × `STG.E.U16` | 756 |
+| `vectorized` | fp32 | 32 × `ld.global.v4.b32` | 64 × `add.f32` | 32 × `LDG.E.128` | 16 × `STG.E.128` | 236 |
+| `for_loop` | fp32 | 128 × `ld.global.b32` | 64 × `add.f32` | 128 × `LDG.E` (32b) | 64 × `STG.E` | 380 |
 
 Bytes moved per thread are identical; what changes is the width. Per-element
 indexing via `thrA[i]` lowers to `ld.global.b16` / `ld.global.b32` at the PTX
@@ -72,6 +79,13 @@ level, and ptxas has no freedom to re-vectorize those back into `LDG.E.128`.
 The warp still hits consecutive addresses at the same instant (TV layout is
 unchanged), but each instruction now only moves 2 B or 4 B per thread instead
 of 16 B.
+
+The `vec_ld_scalar_add` row is the clean control: PTX emits 128 scalar
+`add.f16` (same as `for_loop`), but the SASS is **byte-identical** to
+`vectorized` — ptxas re-packs the scalar adds into `HADD2`/`HFMA2` on its own
+because the operands are clearly adjacent in register space. So the scalar
+`for` loop over the add is free; it's the scalar indexing into *global* memory
+(what the plain `for_loop` variant does) that the compiler can't rescue.
 
 The SASS instruction-count ratio matches the wall-clock slowdown within a
 few percent, consistent with the bottleneck being memory-path issue
