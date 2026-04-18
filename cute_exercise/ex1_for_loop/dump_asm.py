@@ -10,8 +10,14 @@ import subprocess
 import sys
 
 DUMP_DIR = os.path.join(os.path.dirname(__file__), "dump")
+
+# CUTE_DSL_KEEP_* is what populates compiled.__ptx__ / __cubin__. It also
+# writes files to disk as a side effect; point them at /tmp so they don't
+# land in cwd.
 os.environ["CUTE_DSL_KEEP_PTX"] = "1"
 os.environ["CUTE_DSL_KEEP_CUBIN"] = "1"
+os.environ.setdefault("CUTE_DSL_DUMP_DIR", "/tmp/cute_dsl_dump")
+os.makedirs(os.environ["CUTE_DSL_DUMP_DIR"], exist_ok=True)
 
 import torch  # noqa: E402
 
