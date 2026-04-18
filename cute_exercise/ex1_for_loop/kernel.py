@@ -20,7 +20,7 @@ from cutlass.cute.runtime import from_dlpack
 from cute_exercise.base import CuteDSLKernel
 
 
-VARIANTS = ("vectorized", "for_loop")
+VARIANTS = ("vectorized", "for_loop", "vec_ld_scalar_add")
 
 
 class ElementwiseAdd(CuteDSLKernel):
@@ -91,6 +91,13 @@ class ElementwiseAdd(CuteDSLKernel):
 
         if cutlass.const_expr(self.variant == "vectorized"):
             thrC[None] = thrA.load() + thrB.load()
+        elif cutlass.const_expr(self.variant == "vec_ld_scalar_add"):
+            rA = thrA.load()
+            rB = thrB.load()
+            rC = cute.make_fragment_like(thrC)
+            for i in cutlass.range_constexpr(cute.size(rC)):
+                rC[i] = rA[i] + rB[i]
+            thrC[None] = rC.load()
         else:
             for i in cutlass.range_constexpr(cute.size(thrA)):
                 thrC[i] = thrA[i] + thrB[i]
