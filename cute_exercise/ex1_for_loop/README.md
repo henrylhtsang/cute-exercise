@@ -55,21 +55,32 @@ coalesced instructions to issue.
 
 ## Confirming it in PTX/SASS
 
-Dumped with `python dump_asm.py` (sets `CUTE_DSL_KEEP_PTX=1` /
-`CUTE_DSL_KEEP_CUBIN=1`; SASS via `nvdisasm`). See [`dump/README.md`](dump/README.md)
-for the full breakdown.
+Dumped with `python dump_asm.py`, which sets `CUTE_DSL_KEEP_PTX=1` /
+`CUTE_DSL_KEEP_CUBIN=1` and disassembles the cubin with `nvdisasm` against
+`sm_100a`.
 
-| variant | dtype | SASS loads (per thread) | SASS insn count |
-|---|---|---|---:|
-| `vectorized` | fp16 | 32 × `LDG.E.128` | 236 |
-| `vectorized` | fp32 | 32 × `LDG.E.128` | 236 |
-| `for_loop` | fp16 | 256 × `LDG.E.U16` | 756 |
-| `for_loop` | fp32 | 128 × `LDG.E` (32-bit) | 380 |
+| variant | dtype | PTX loads | SASS loads | SASS stores | SASS insn count |
+|---|---|---|---|---|---:|
+| `vectorized` | fp16 | 32 × `ld.global.v4.b32` | 32 × `LDG.E.128` | 16 × `STG.E.128` | 236 |
+| `vectorized` | fp32 | 32 × `ld.global.v4.b32` | 32 × `LDG.E.128` | 16 × `STG.E.128` | 236 |
+| `for_loop` | fp16 | 256 × `ld.global.b16` | 256 × `LDG.E.U16` | 128 × `STG.E.U16` | 756 |
+| `for_loop` | fp32 | 128 × `ld.global.b32` | 128 × `LDG.E` (32b) | 64 × `STG.E` | 380 |
 
-Bytes moved per thread are identical; what changes is the width. PTX-level
-`thrA[i]` lowers to `ld.global.b16` / `ld.global.b32`, and ptxas has no
-freedom to re-vectorize. The SASS instruction-count ratio (3.2× / 1.6×)
-matches the wall-clock slowdown (3.07× / 1.56×) to within a few percent.
+Bytes moved per thread are identical; what changes is the width. Per-element
+indexing via `thrA[i]` lowers to `ld.global.b16` / `ld.global.b32` at the PTX
+level, and ptxas has no freedom to re-vectorize those back into `LDG.E.128`.
+The warp still hits consecutive addresses at the same instant (TV layout is
+unchanged), but each instruction now only moves 2 B or 4 B per thread instead
+of 16 B.
+
+The SASS instruction-count ratio matches the wall-clock slowdown within a
+few percent, consistent with the bottleneck being memory-path issue
+throughput, not DRAM bandwidth:
+
+| variant | dtype | SASS insn ratio | wall-clock ratio |
+|---|---|---:|---:|
+| `for_loop` | fp16 | 756 / 236 = **3.2×** | 359 / 117 = **3.07×** |
+| `for_loop` | fp32 | 380 / 236 = **1.61×** | 358 / 230 = **1.56×** |
 
 ## Follow-ups
 
