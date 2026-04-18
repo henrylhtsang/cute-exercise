@@ -25,22 +25,20 @@ Some angles:
 | `for_loop` (per-element `thrA[i] + thrB[i]` over global) | 360 us / 2238 GB/s | 357 us / 4515 GB/s |
 
 Vectorized matches `torch.add` within ~2%. Plain `for i: thrC[i] = thrA[i] +
-thrB[i]` drops to ~32% (fp16) / ~64% (fp32) of peak.
+thrB[i]` drops to ~32% (fp16) / ~64% (fp32) of peak. The three fast variants
+are all basically the same.
 
-The three fast variants are all the same — and `scalar_ld_vec_add` is the
-interesting one: it tries to force *scalar* loads by filling register
-fragments element-by-element, but the CuTe DSL / MLIR / NVVM frontend
-coalesces those scalar assignments back into wide `ld.global.v4` before PTX.
-So the plain `for_loop` variant is the only one that actually produces scalar
-global ld/st in PTX — because its loop body mixes the load with the store.
+## Why the `for` loop is slow
 
-## Why the `for` loop is slow — coalescing at the same instant
+### Coalescing at the same instant
 
 The hardware caps each thread at a 128-bit (16 B) ld/st per instruction, so
 moving 128 fp16 values per thread takes multiple instructions no matter what.
 What matters is that **the 32 threads of a warp, executing the same
 instruction at the same instant, hit consecutive addresses** — that's what
 lets the hardware fold them into a few 128 B sectors.
+
+### The (16 rows, 8 cols) TV layout
 
 Our TV layout gives each thread a `(16 rows, 8 cols)` fragment:
 
@@ -53,8 +51,9 @@ The `for_loop` variant has the same TV layout; the issue is that indexing
 ld/st instead of packing a row into a single 128-bit instruction, so the
 "same instant" still holds but the wide vector op is lost.
 
-A naively different layout — "give each thread 128 consecutive elements" —
-would be even worse: within any single 128-bit instruction, thread `i` would
+### Why not just give each thread 128 consecutive elements?
+
+Would be even worse: within any single 128-bit instruction, thread `i` would
 be 256 B away from thread `i+1`, so the warp would fan out to 32 separate
 sectors per instruction (~8× the memory traffic) instead of 4.
 
@@ -67,6 +66,8 @@ coalesced instructions to issue.
 Dumped with `python dump_asm.py`, which sets `CUTE_DSL_KEEP_PTX=1` /
 `CUTE_DSL_KEEP_CUBIN=1` and disassembles the cubin with `nvdisasm` against
 `sm_100a`.
+
+### What each variant lowers to
 
 | variant | dtype | PTX loads | PTX adds | SASS loads | SASS stores | SASS insn |
 |---|---|---|---|---|---|---:|
@@ -84,19 +85,24 @@ The warp still hits consecutive addresses at the same instant (TV layout is
 unchanged), but each instruction now only moves 2 B or 4 B per thread instead
 of 16 B.
 
-The `vec_ld_scalar_add` row is the clean control: PTX emits 128 scalar
-`add.f16` (same as `for_loop`), but the SASS is **byte-identical** to
-`vectorized` — ptxas re-packs the scalar adds into `HADD2`/`HFMA2` on its own
-because the operands are clearly adjacent in register space. So the scalar
-`for` loop over the add is free; it's the scalar indexing into *global* memory
-(what the plain `for_loop` variant does) that the compiler can't rescue.
+### ptxas rescues scalar adds
+
+`vec_ld_scalar_add` is the clean control: PTX emits 128 scalar `add.f16`
+(same as `for_loop`), but the SASS is **byte-identical** to `vectorized` —
+ptxas re-packs the scalar adds into `HADD2`/`HFMA2` on its own because the
+operands are clearly adjacent in register space. So a scalar `for` over the
+add is free; it's the scalar indexing into *global* memory that can't be
+rescued.
+
+### The frontend rescues scalar loads too
 
 `scalar_ld_vec_add` tries the opposite: scalar `rA[i] = thrA[i]` assignments
 filling a register fragment, then a fragment-wide `rA.load() + rB.load()`.
-Surprise — the CuTe DSL / MLIR / NVVM frontend re-vectorizes the scalar loads
-into wide `ld.global.v4` before PTX, and the SASS again ends up
-byte-identical to `vectorized`. So the two compiler layers rescue different
-things:
+Surprise — the CuTe DSL / MLIR / NVVM frontend re-vectorizes the scalar
+loads into wide `ld.global.v4` before PTX, and the SASS again ends up
+byte-identical to `vectorized`.
+
+### Who rescues what
 
 | layer | scalar adds → packed? | scalar loads → wide? |
 |---|---|---|
@@ -107,6 +113,8 @@ The only way to actually get scalar global ld/st in PTX is what plain
 `for_loop` does: mix the load, add, and store in the same loop body — the
 interleaving breaks the frontend's dataflow analysis and it can't lift out
 the wide load.
+
+### Instruction-count tracks wall-clock
 
 The SASS instruction-count ratio matches the wall-clock slowdown within a
 few percent, consistent with the bottleneck being memory-path issue
