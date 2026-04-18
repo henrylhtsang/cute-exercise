@@ -53,6 +53,24 @@ The outer "16 rows" isn't about packing more work into one instruction (you
 can't; 16 B is the hardware cap). It's about giving each thread 16 cleanly
 coalesced instructions to issue.
 
+## Confirming it in PTX/SASS
+
+Dumped with `python dump_asm.py` (sets `CUTE_DSL_KEEP_PTX=1` /
+`CUTE_DSL_KEEP_CUBIN=1`; SASS via `nvdisasm`). See [`dump/README.md`](dump/README.md)
+for the full breakdown.
+
+| variant | dtype | SASS loads (per thread) | SASS insn count |
+|---|---|---|---:|
+| `vectorized` | fp16 | 32 × `LDG.E.128` | 236 |
+| `vectorized` | fp32 | 32 × `LDG.E.128` | 236 |
+| `for_loop` | fp16 | 256 × `LDG.E.U16` | 756 |
+| `for_loop` | fp32 | 128 × `LDG.E` (32-bit) | 380 |
+
+Bytes moved per thread are identical; what changes is the width. PTX-level
+`thrA[i]` lowers to `ld.global.b16` / `ld.global.b32`, and ptxas has no
+freedom to re-vectorize. The SASS instruction-count ratio (3.2× / 1.6×)
+matches the wall-clock slowdown (3.07× / 1.56×) to within a few percent.
+
 ## Follow-ups
 
 - **Persistent kernel + CTA swizzle** — one block per SM looping over tiles;
