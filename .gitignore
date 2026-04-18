@@ -4,6 +4,9 @@
 .vscode
 plots/*
 data/*
+*.cubin
+*.ptx
+*.sass
 
 # scratch space
 agent_space
