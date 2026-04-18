@@ -3,7 +3,7 @@
 import torch
 
 from cute_exercise.benchmark import bandwidth_gbps, benchmark
-from cute_exercise.for_loop.kernel import VARIANTS, elementwise_add_interface
+from cute_exercise.ex1_for_loop.kernel import VARIANTS, elementwise_add_interface
 
 
 def run_variants(M=16384, N=8192, dtype=torch.float16):

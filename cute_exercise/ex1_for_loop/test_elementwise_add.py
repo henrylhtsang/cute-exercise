@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from cute_exercise.for_loop.kernel import VARIANTS, elementwise_add_interface
+from cute_exercise.ex1_for_loop.kernel import VARIANTS, elementwise_add_interface
 
 
 @pytest.mark.parametrize(
