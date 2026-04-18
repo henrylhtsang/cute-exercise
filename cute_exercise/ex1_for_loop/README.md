@@ -21,15 +21,18 @@ Some angles:
 | `torch.add` (baseline) | 115 us / 6996 GB/s | 228 us / 7075 GB/s |
 | `vectorized` (fragment `.load()`) | 117 us / 6858 GB/s | 230 us / 7012 GB/s |
 | `vec_ld_scalar_add` (wide ld/st, scalar `for` for the add) | 117 us / 6874 GB/s | 230 us / 7013 GB/s |
+| `scalar_ld_vec_add` (scalar `for` filling register frags, then vector add+store) | 118 us / 6846 GB/s | 230 us / 7009 GB/s |
 | `for_loop` (per-element `thrA[i] + thrB[i]` over global) | 360 us / 2238 GB/s | 357 us / 4515 GB/s |
 
 Vectorized matches `torch.add` within ~2%. Plain `for i: thrC[i] = thrA[i] +
 thrB[i]` drops to ~32% (fp16) / ~64% (fp32) of peak.
 
-`vec_ld_scalar_add` is the interesting middle ground: vectorized loads into
-register fragments via `.load()`, then a scalar Python `for` over the register
-fragment for the add, then a vectorized store. It matches `vectorized` exactly
-— the damage from a `for` loop is entirely at the memory level, not compute.
+The three fast variants are all the same — and `scalar_ld_vec_add` is the
+interesting one: it tries to force *scalar* loads by filling register
+fragments element-by-element, but the CuTe DSL / MLIR / NVVM frontend
+coalesces those scalar assignments back into wide `ld.global.v4` before PTX.
+So the plain `for_loop` variant is the only one that actually produces scalar
+global ld/st in PTX — because its loop body mixes the load with the store.
 
 ## Why the `for` loop is slow — coalescing at the same instant
 
@@ -69,6 +72,7 @@ Dumped with `python dump_asm.py`, which sets `CUTE_DSL_KEEP_PTX=1` /
 |---|---|---|---|---|---|---:|
 | `vectorized` | fp16 | 32 × `ld.global.v4.b32` | 64 × `add.f16x2` | 32 × `LDG.E.128` | 16 × `STG.E.128` | 236 |
 | `vec_ld_scalar_add` | fp16 | 32 × `ld.global.v4.b32` | 128 × `add.f16` | 32 × `LDG.E.128` | 16 × `STG.E.128` | 236 |
+| `scalar_ld_vec_add` | fp16 | 32 × `ld.global.v4.b32` | 64 × `add.f16x2` | 32 × `LDG.E.128` | 16 × `STG.E.128` | 236 |
 | `for_loop` | fp16 | 256 × `ld.global.b16` | 128 × `add.f16` | 256 × `LDG.E.U16` | 128 × `STG.E.U16` | 756 |
 | `vectorized` | fp32 | 32 × `ld.global.v4.b32` | 64 × `add.f32` | 32 × `LDG.E.128` | 16 × `STG.E.128` | 236 |
 | `for_loop` | fp32 | 128 × `ld.global.b32` | 64 × `add.f32` | 128 × `LDG.E` (32b) | 64 × `STG.E` | 380 |
@@ -86,6 +90,23 @@ The `vec_ld_scalar_add` row is the clean control: PTX emits 128 scalar
 because the operands are clearly adjacent in register space. So the scalar
 `for` loop over the add is free; it's the scalar indexing into *global* memory
 (what the plain `for_loop` variant does) that the compiler can't rescue.
+
+`scalar_ld_vec_add` tries the opposite: scalar `rA[i] = thrA[i]` assignments
+filling a register fragment, then a fragment-wide `rA.load() + rB.load()`.
+Surprise — the CuTe DSL / MLIR / NVVM frontend re-vectorizes the scalar loads
+into wide `ld.global.v4` before PTX, and the SASS again ends up
+byte-identical to `vectorized`. So the two compiler layers rescue different
+things:
+
+| layer | scalar adds → packed? | scalar loads → wide? |
+|---|---|---|
+| CuTe DSL → MLIR → NVVM (PTX gen) | no | **yes**, when dataflow into a register fragment is clear |
+| ptxas (PTX → SASS) | **yes**, into `HADD2`/`HFMA2` | no |
+
+The only way to actually get scalar global ld/st in PTX is what plain
+`for_loop` does: mix the load, add, and store in the same loop body — the
+interleaving breaks the frontend's dataflow analysis and it can't lift out
+the wide load.
 
 The SASS instruction-count ratio matches the wall-clock slowdown within a
 few percent, consistent with the bottleneck being memory-path issue
