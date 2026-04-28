@@ -40,3 +40,4 @@ subdirectory contains:
 6. [Single-tile TF32 matmul — TMEM + `tcgen05` practice](cute_exercise/ex6_single_tile_tf32_matmul/)
 7. [TF32×3 matmul — does the precision actually improve?](cute_exercise/ex7_tf32x3_matmul/)
 8. [Skip the `fence.proxy.async` between generic SMEM writes and TMA — what breaks?](cute_exercise/ex8_missing_proxy_fence/)
+9. [How do I write a transpose in CuTe DSL?](cute_exercise/ex9_transpose/)
