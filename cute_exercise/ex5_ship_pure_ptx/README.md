@@ -24,19 +24,73 @@ What's the cleanest workflow?
 
 ## How to use
 
-```bash
-# Dump artifacts (one-time, source of truth = DSL Python in ex1):
-python -m cute_exercise.ex5_ship_pure_ptx.dump_ptx --dtype fp16 fp32 --shape 16384 8192
+### 1. Generate the PTX (only if you change the DSL source or want a new shape/arch)
 
-# Run the kernel without ever invoking cute.compile:
-python -c "
+The `artifacts/` directory already ships the PTX + manifest for fp16/fp32
+at `16384x8192` on `sm_100a`. You only need to re-dump if:
+
+- you edited `ElementwiseAdd` in `cute_exercise/ex1_for_loop/kernel.py`,
+- you want a different `(dtype, M, N)`,
+- you're targeting a different SM arch (the build runs on whatever GPU is
+  visible to PyTorch — set `CUDA_VISIBLE_DEVICES` to pick).
+
+```bash
+# Default: fp16 + fp32 at 16384x8192, host-driver PTX ISA ceiling
+python -m cute_exercise.ex5_ship_pure_ptx.dump_ptx
+
+# Custom shape / dtype
+python -m cute_exercise.ex5_ship_pure_ptx.dump_ptx --dtype fp16 --shape 8192 4096
+
+# Cross-host shipping: pin the PTX ISA version to the deployment driver's
+# ceiling instead of the build host's (CUDA 13.0 driver -> 9.0; 12.4 -> 8.4)
+python -m cute_exercise.ex5_ship_pure_ptx.dump_ptx --ptx-version 9.0
+```
+
+Output (in `artifacts/`):
+
+```
+elementwise_add_<dtype>_<MxN>_<arch>.ptx
+elementwise_add_<dtype>_<MxN>_<arch>.manifest.json
+```
+
+Both files are required at runtime — the manifest carries the kernel
+symbol, grid/block, and ABI description.
+
+### 2. Run the kernel (no `cute.compile` on the hot path)
+
+```python
 import torch
 from cute_exercise.ex5_ship_pure_ptx.ptx_runner import elementwise_add_ptx
-a = torch.randn(16384, 8192, device='cuda', dtype=torch.float16)
+
+a = torch.randn(16384, 8192, device="cuda", dtype=torch.float16)
 b = torch.randn_like(a)
+
+# allocates output (must match a shape/dtype/contiguous/cuda)
 c = elementwise_add_ptx(a, b)
-print('match:', torch.equal(c, a + b))
-"
+
+# or in-place into a pre-allocated buffer
+out = torch.empty_like(a)
+elementwise_add_ptx(a, b, out=out)
+
+# explicit stream (must be on the same device as the tensors)
+stream = torch.cuda.current_stream(a.device)
+elementwise_add_ptx(a, b, out=out, stream=stream)
+```
+
+The first call for a given `(dtype, shape, device)` reads the matching
+artifact and runs `cuModuleLoadData` (~tens of ms). Subsequent calls hit
+the cache and only pay `cuLaunchKernel`.
+
+Importing `ptx_runner` does **not** import `cutlass` / CuTe DSL.
+
+### 3. Verify and benchmark
+
+```bash
+# Correctness: PTX vs DSL JIT vs torch.add (bit-exact)
+pytest -q cute_exercise/ex5_ship_pure_ptx/test_elementwise_add_ptx.py
+
+# Cold-start (subprocess-isolated) + steady-state benchmark
+python -m cute_exercise.ex5_ship_pure_ptx.bench
 ```
 
 ## Results (GB200, M=16384, N=8192)
