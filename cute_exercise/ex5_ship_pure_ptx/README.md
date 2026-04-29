@@ -2,60 +2,125 @@
 
 ## Question
 
-I have a CuTe DSL kernel I'm happy with. I want to keep the DSL source
-as the source of truth (still readable, still editable in Python), but
-ship the kernel as **pre-compiled PTX** so end users don't pay the
-CuTe DSL JIT cost on first call.
+I have a CuTe DSL kernel I'm happy with. I want to keep the DSL source as
+the source of truth (still readable, still editable in Python), but ship
+the kernel as **pre-compiled PTX** so end users don't pay the CuTe DSL JIT
+cost on first call.
 
 What's the cleanest workflow?
 
-1. **Extract**: dump the PTX that CuTe DSL produces for this kernel
-   (already done in ex1 via `CUTE_DSL_DUMP_DIR` — reuse that).
-2. **Embed**: store the PTX as a string / `.ptx` file alongside the
-   Python module that owns the kernel.
-3. **Load + launch from Python**: at import / first-call time, load
-   the embedded PTX with the CUDA driver API
-   (`cuModuleLoadData` → `cuModuleGetFunction` → `cuLaunchKernel`),
-   cache the `CUmodule`, and expose a Python entry point with the
-   same signature as the DSL kernel.
-4. **Keep both paths**: the DSL source stays in the repo and stays
-   runnable (for editing, debugging, re-dumping PTX). A flag /
-   env var picks DSL-JIT vs pre-compiled PTX at runtime.
+## Files
 
-## Plan
+- `dump_ptx.py`: compiles the DSL kernel (re-using `ElementwiseAdd` from
+  ex1) and writes `artifacts/elementwise_add_<dtype>_<MxN>_<sm>.ptx` plus
+  a `.manifest.json` sidecar with the kernel symbol, grid/block, and ABI
+  description. Re-run whenever the DSL source or tile geometry changes.
+- `ptx_runner.py`: load `.ptx` via `cuModuleLoadData`, cache the
+  `CUmodule` + `CUfunction`, launch via `cuLaunchKernel` with 3 device
+  pointers as kernel params. No CuTe DSL import on the hot path.
+- `test_elementwise_add_ptx.py`: PTX result == DSL result == `torch.add`.
+- `bench.py`: subprocess-isolated cold-start timing + in-process
+  steady-state.
 
-- Pick a small kernel from an earlier exercise (ex3's TMA vec add is a
-  good candidate) as the guinea pig.
-- Add a `dump_ptx.py` helper that compiles the DSL kernel once and
-  writes `<kernel>.ptx` next to it. Re-run whenever the DSL source
-  changes.
-- Add a `ptx_runner.py` that:
-  - reads the embedded `.ptx`,
-  - `cuModuleLoadData` once (cache module + function on a module-level
-    dict keyed by device + kernel name),
-  - packs args and calls `cuLaunchKernel` with the same grid/block as
-    the DSL launch.
-- Wire both paths into `benchmark.py` behind a `--mode {dsl,ptx}`
-  flag.
+## How to use
 
-What to verify:
+```bash
+# Dump artifacts (one-time, source of truth = DSL Python in ex1):
+python -m cute_exercise.ex5_ship_pure_ptx.dump_ptx --dtype fp16 fp32 --shape 16384 8192
 
-- Numeric output of the PTX path matches the DSL path bit-for-bit
-  (same kernel, same PTX → should be identical).
-- First-call latency: DSL JIT vs `cuModuleLoadData`. Expect the PTX
-  path to be much faster on cold start.
-- Steady-state throughput: identical (same SASS).
-- Re-dumping PTX is a one-line workflow when the DSL source changes,
-  so the DSL stays the editable source of truth.
+# Run the kernel without ever invoking cute.compile:
+python -c "
+import torch
+from cute_exercise.ex5_ship_pure_ptx.ptx_runner import elementwise_add_ptx
+a = torch.randn(16384, 8192, device='cuda', dtype=torch.float16)
+b = torch.randn_like(a)
+c = elementwise_add_ptx(a, b)
+print('match:', torch.equal(c, a + b))
+"
+```
 
-Open questions to settle while implementing:
+## Results (GB200, M=16384, N=8192)
 
-- Does CuTe DSL emit PTX that's portable across SM versions, or do we
-  need one `.ptx` per arch (SM90, SM100, …)? If per-arch, fold the
-  arch into the filename and pick at load time.
-- Arg-packing: does the DSL kernel's PTX expect the same ABI as a
-  hand-written kernel, or does CuTe wrap args in a struct? Inspect
-  the dumped PTX's `.entry` signature to confirm.
-- Is there a CuTe DSL helper that already does "compile to PTX once,
-  reuse later" without us reaching for the driver API directly? If so
-  prefer that — fall back to driver API if not.
+### Cold-start: process-boot → first result
+
+Each cell is a fresh `python -c '<allocate inputs; import + first call>'`
+subprocess, sync'd. Median of 3 trials.
+
+| mode                | fp16    | fp32    |
+|---------------------|--------:|--------:|
+| `torch.add`         | 5.4 ms  | 5.8 ms  |
+| DSL (JIT)           | 427 ms  | 447 ms  |
+| **pre-compiled PTX**| **14 ms** | **15 ms** |
+
+The DSL pays a full `cute.compile` (MLIR → LLVM → ptxas → cubin) on first
+call. The PTX path pays only a file read + `cuModuleLoadData` (driver
+JITs PTX → SASS, much smaller). **~30× faster cold start.**
+
+### Steady-state (same kernel, same SASS)
+
+| variant             | fp16               | fp32               |
+|---------------------|-------------------:|-------------------:|
+| `torch.add`         | 115 us / 6996 GB/s | 228 us / 7074 GB/s |
+| DSL (JIT, cached)   | 117 us / 6866 GB/s | 230 us / 7012 GB/s |
+| pre-compiled PTX    | 118 us / 6820 GB/s | 230 us / 7012 GB/s |
+
+All within 1% — as expected (same kernel, same SASS, same launch
+config).
+
+## Open questions, settled
+
+**Does CuTe DSL emit portable PTX?** PTX is portable across SM versions
+*if the kernel doesn't use SM-specific features and you target a base
+arch* (e.g. `sm_80`). For an elementwise kernel that's true. But the DSL
+defaults to the host's `sm_<major><minor>a` (architecture-suffixed — on
+GB200 that's `sm_100a`, which includes Blackwell-specific features). So
+the PTX as dumped is **arch-specific**: ship one `.ptx` per (arch,
+dtype). The artifact filename encodes both.
+
+**ABI: what does the device kernel's `.entry` expect?** With static
+shape (no `mark_layout_dynamic`), each `cute.Tensor` flattens to a single
+8-byte device pointer (shape and strides are baked into the cubin as
+constants). So the kernel signature is just `(void* a, void* b, void* c)`
+— easy to pack from Python with the cuda-python `(values, ctypes)` form
+of `cuLaunchKernel`. Verified by inspecting the dumped `.entry`:
+
+```
+.visible .entry kernel_..._param_0[8],   // a ptr
+                kernel_..._param_1[8],   // b ptr
+                kernel_..._param_2[8]    // c ptr
+```
+
+If we instead `mark_layout_dynamic()`, each tensor becomes a 64-byte
+struct (ptr + dynamic shape + dynamic strides + padding). One PTX would
+then serve all `(M, N)` divisible by the tile, but Python has to
+hand-pack that struct — fragile. We took the simpler path and let the
+artifact filename carry the shape.
+
+**Is there an official CuTe helper for "compile once, ship later"?** Yes,
+but it ships **cubin** (not PTX) wrapped in a `.o` file together with a
+generated host launch entry:
+`JitCompiledFunction.export_to_c(...)` + `cute.runtime.load_module(...)`.
+See `cutlass/examples/python/CuTeDSL/cute/export/`. That path is more
+ergonomic (handles `mark_layout_dynamic` correctly and exposes the same
+Python signature as the DSL) but ties the artifact to one SM. The
+pure-PTX path here is the lower-level alternative — useful when you want
+the driver to re-translate PTX → SASS at load time, or when you want a
+human-readable artifact you can inspect/diff.
+
+**Driver vs PTX version mismatch.** The DSL ships its own `ptxas` (CUDA
+13.1 in this env), which emits `.version 9.1` PTX. A host driver at CUDA
+13.0 only accepts up to `.version 9.0` and rejects the dumped PTX with
+`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`. `dump_ptx.py` detects the host
+driver version and rewrites the `.version` line down to the highest
+supported value before saving. Safe iff the kernel doesn't use post-9.0
+instructions (true for elementwise; revisit for kernels that use
+`tcgen05` / cluster TMA / ...).
+
+## Why this matters
+
+For a one-shot benchmark, full JIT is fine. For a library or a deployment
+that imports the kernel as part of a larger startup path — PyTorch op
+libraries, MoE expert dispatch, anything where users measure TTFT —
+paying 400+ ms per kernel per cold start is unacceptable. The PTX path
+turns that into ~15 ms while keeping the DSL source as the source of
+truth.
