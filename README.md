@@ -42,3 +42,4 @@ subdirectory contains:
 8. [Skip the `fence.proxy.async` between generic SMEM writes and TMA — what breaks?](cute_exercise/ex8_missing_proxy_fence/)
 9. [How do I write a transpose in CuTe DSL?](cute_exercise/ex9_transpose/)
 10. [How does SMEM / L2 swizzle work? (blockwise matrix add)](cute_exercise/ex10_swizzle_blockwise_add/)
+11. [How does TMA load and store zeroing work?](cute_exercise/ex11_tma_zeroing/)
