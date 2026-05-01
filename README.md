@@ -46,3 +46,4 @@ subdirectory contains:
 12. [How do I write an FP8 matmul, with different scaling granularities?](cute_exercise/ex12_fp8_matmul/)
 13. [How do I write an MXFP8 matmul?](cute_exercise/ex13_mxfp8_matmul/)
 14. [How do I write an NVFP4 matmul?](cute_exercise/ex14_nvfp4_matmul/)
+15. [How does distributed shared memory work? (cluster histogram)](cute_exercise/ex15_dsmem_histogram/)
