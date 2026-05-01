@@ -43,3 +43,6 @@ subdirectory contains:
 9. [How do I write a transpose in CuTe DSL?](cute_exercise/ex9_transpose/)
 10. [How does SMEM / L2 swizzle work? (blockwise matrix add)](cute_exercise/ex10_swizzle_blockwise_add/)
 11. [How does TMA load and store zeroing work?](cute_exercise/ex11_tma_zeroing/)
+12. [How do I write an FP8 matmul, with different scaling granularities?](cute_exercise/ex12_fp8_matmul/)
+13. [How do I write an MXFP8 matmul?](cute_exercise/ex13_mxfp8_matmul/)
+14. [How do I write an NVFP4 matmul?](cute_exercise/ex14_nvfp4_matmul/)
