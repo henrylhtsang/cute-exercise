@@ -1,0 +1,34 @@
+{
+  "kernel_name": "kernel_cutlass_kernel_cute_exerciseex1_for_loopkernelElementwiseAdd_object_at__tensorptrf16gmemalign16o645121625681921512524288_tensorptrf16gmemalign16o645121625681921512524288_tensorptrf_0",
+  "dtype": "fp16",
+  "arch": "sm_100a",
+  "shape": [
+    16384,
+    8192
+  ],
+  "grid": [
+    4096,
+    1,
+    1
+  ],
+  "block": [
+    256,
+    1,
+    1
+  ],
+  "smem_bytes": 0,
+  "params": [
+    {
+      "name": "a_ptr",
+      "ctype": "void_p"
+    },
+    {
+      "name": "b_ptr",
+      "ctype": "void_p"
+    },
+    {
+      "name": "c_ptr",
+      "ctype": "void_p"
+    }
+  ]
+}
