@@ -47,3 +47,5 @@ subdirectory contains:
 13. [How do I write an MXFP8 matmul?](cute_exercise/ex13_mxfp8_matmul/)
 14. [How do I write an NVFP4 matmul?](cute_exercise/ex14_nvfp4_matmul/)
 15. [How does distributed shared memory work? (cluster histogram)](cute_exercise/ex15_dsmem_histogram/)
+16. [How do I write code that lowers to the R2P SASS instruction?](cute_exercise/ex16_r2p_masking/)
+17. [How does TMA work when one stride needs to be dynamic?](cute_exercise/ex17_tma_dynamic_stride/)
