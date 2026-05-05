@@ -49,3 +49,5 @@ subdirectory contains:
 15. [How does distributed shared memory work? (cluster histogram)](cute_exercise/ex15_dsmem_histogram/)
 16. [How do I write code that lowers to the R2P SASS instruction?](cute_exercise/ex16_r2p_masking/)
 17. [How does TMA work when one stride needs to be dynamic?](cute_exercise/ex17_tma_dynamic_stride/)
+18. [Does TMA multicast actually save bandwidth on a memory-bound op?](cute_exercise/ex18_tma_multicast/)
+19. [How does 2-CTA MMA (`tcgen05.mma cta_group::2`) work, and when does it help?](cute_exercise/ex19_2cta_mma/)
