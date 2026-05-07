@@ -16,7 +16,24 @@ from cutlass.cute.nvgpu import cpasync, tcgen05
 @cute.jit
 def transpose(A: cute.Tensor, B: cute.Tensor):
     tiler = (32, 32)
-    smem_layout = cute.make_layout((32, 32), stride=(32, 1))
+
+    swizzle = cute.make_swizzle(3, 4, 2)
+    smem_atom_layout = cute.make_layout((8, 32), stride=(32, 1))
+    # inner: last thing to apply
+    # outer: first thing to apply
+    # it is called outer because it is what we see from the outside looking
+    # at the blackbox
+    smem_layout = cute.make_composed_layout(
+        inner=swizzle,
+        offset=0,
+        outer=smem_atom_layout,
+    )
+    smem_layout = cute.tile_to_shape(
+        smem_layout,
+        (32, 32),
+        order=(1, 0),
+    )
+    # smem_layout = cute.make_layout((32, 32), stride=(32, 1))
     tma_tiler = (32, 32)
 
     tma_load_op = cpasync.CopyBulkTensorTileG2SOp(tcgen05.CtaGroup.ONE)

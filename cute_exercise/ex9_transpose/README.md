@@ -8,7 +8,9 @@ B[i, j] = A[j, i]
 
 The final checked-in kernel is a hybrid:
 
-1. TMA-load a contiguous `32 x 32` tile from `A` into shared memory.
+1. TMA-load a contiguous `32 x 32` tile from `A` into shared memory using a
+   SW128-swizzled SMEM layout to reduce bank conflicts on the transposed
+   read.
 2. Wait on the TMA mbarrier.
 3. Read the tile transposed from shared memory into registers.
 4. Store the output tile with a thread-level `cute.copy` to `B`.
@@ -19,7 +21,25 @@ CuTe/TMA synchronization and layout lessons.
 
 ## Current design
 
-The host builds a TMA load atom for `A`:
+The SMEM layout is built as a `Swizzle ∘ Layout` composition, then tiled to
+the full `32 x 32` shape:
+
+```python
+swizzle = cute.make_swizzle(3, 4, 2)
+smem_atom_layout = cute.make_layout((8, 32), stride=(32, 1))
+smem_layout = cute.make_composed_layout(
+    inner=swizzle, offset=0, outer=smem_atom_layout,
+)
+smem_layout = cute.tile_to_shape(smem_layout, (32, 32), order=(1, 0))
+```
+
+The swizzle XOR-permutes the linear SMEM offset so that the column-strided
+read `sA[tidx, i]` no longer collides on a single bank. Logical indexing
+(`sA[m, n]`) is unchanged; the swizzle is transparent to the user, and TMA's
+hardware swizzle field in the descriptor matches the layout, so what TMA
+writes is what `cute` reads.
+
+The host then builds a TMA load atom for `A` using this swizzled layout:
 
 ```python
 tma_atom_a, tma_tensor_a = cpasync.make_tiled_tma_atom(
@@ -114,19 +134,24 @@ Important checkpoints from the exercise:
   bank conflicts. It kept instruction count low and global accesses coalesced.
 - `+1` padding reduced shared-memory bank conflicts but increased instruction
   count and slowed the benchmark.
-- CuTe SMEM swizzle variants (`MN_SW32`, `MN_SW64`, `MN_SW128`) were correct but
-  slower than the simple shared-memory variant for this small fixed tile.
+- CuTe SMEM swizzle variants on the earlier non-TMA cp.async kernel
+  (`MN_SW32`, `MN_SW64`, `MN_SW128`) were correct but slower than the
+  unpadded shared-memory variant for this small fixed tile.
+- On the TMA-hybrid kernel, adding a SW128-shaped swizzle
+  (`Swizzle<3,4,2>` composed with `(8,32):(32,1)`, tiled to `(32,32)`)
+  gave a small but consistent speedup (2-10%) by reducing the column-read
+  bank conflicts. This is the swizzle that is checked in.
 - The final TMA-load hybrid is correct and useful as a TMA learning endpoint, but
   it is not faster than the best non-TMA shared-memory kernel on all shapes.
 
-Recent benchmark for the final hybrid:
+Recent benchmark for the final hybrid (with SW128 swizzle, GB200, fp32):
 
 ```text
-shape         torch ms   cute ms   cute / torch
-4096x4096      0.0854    0.0599        0.70x
-8192x1024      0.0495    0.0500        1.01x
-1024x8192      0.0502    0.0498        0.99x
-4096x8192      0.1551    0.0835        0.54x
+shape         torch ms   cute ms   cute / torch   cute GB/s
+4096x4096      0.0817    0.0594        0.73x        2260
+8192x1024      0.0465    0.0469        1.01x        1432
+1024x8192      0.0470    0.0483        1.03x        1390
+4096x8192      0.1518    0.0825        0.54x        3253
 ```
 
 The best earlier non-TMA shared-memory variant was faster for `4096 x 4096`
@@ -138,6 +163,7 @@ version, not the absolute best transpose kernel found in the exercise.
 For this branch, keep the current hybrid:
 
 - TMA load for the input tile.
+- SW128-swizzled SMEM layout to reduce column-read bank conflicts.
 - Mbarrier wait for load completion.
 - Register transpose from shared memory.
 - Thread-level `cute.copy` for the output store.
