@@ -16,13 +16,6 @@ from cutlass.cute.nvgpu import cpasync, tcgen05
 @cute.jit
 def transpose(A: cute.Tensor, B: cute.Tensor):
     tiler = (32, 32)
-
-    # gA = cute.zipped_divide(A, tiler)
-    # gB = cute.zipped_divide(B, tiler)
-
-    # S = cute.make_ordered_layout(shape=gA.shape[1], order=(1, 0))
-    # gB = cute.composition(gB, (None, S))
-
     smem_layout = cute.make_layout((32, 32), stride=(32, 1))
     tma_tiler = (32, 32)
 
@@ -34,15 +27,9 @@ def transpose(A: cute.Tensor, B: cute.Tensor):
         tma_tiler
     )
 
-    tma_store_op = cpasync.CopyBulkTensorTileS2GOp()
-    tma_atom_b, tma_tensor_b = cpasync.make_tiled_tma_atom(
-        tma_store_op,
-        B,
-        smem_layout,
-        tma_tiler,
-    )
+    gB = cute.zipped_divide(B, tiler)
 
-    kernel(tma_tensor_a, tma_tensor_b, tma_atom_a, tma_atom_b, smem_layout).launch(
+    kernel(tma_tensor_a, gB, tma_atom_a, smem_layout).launch(
         grid=(
             cute.ceil_div(cute.size(A.shape[0]), tma_tiler[0]),
             cute.ceil_div(cute.size(A.shape[1]), tma_tiler[1]),
@@ -53,20 +40,34 @@ def transpose(A: cute.Tensor, B: cute.Tensor):
 
 
 @cute.kernel
-def kernel(tma_tensor_a, tma_tensor_b, tma_atom_a, tma_atom_b, smem_layout):
+def kernel(tma_tensor_a, gB, tma_atom_a, smem_layout):
     tidx, _, _ = cute.arch.thread_idx()
     bidx, bidy, _ = cute.arch.block_idx()
 
+    # Each CTA reads one row-major A tile with TMA and writes the transposed
+    # output tile with a thread-level vectorized copy.
+    a_coord = (bidx, bidy)
+    b_coord = ((None, None), (bidy, bidx))
+
     smem = SmemAllocator()
     sA = smem.allocate_tensor(cutlass.Float32, smem_layout)
+    s_mbar = smem.allocate_tensor(cutlass.Int64, cute.make_layout(1), byte_alignment=8)
 
-    # blk_coord = ((None, None), bidx)
-    # blkA = gA[blk_coord]
-    # blkB = gB[blk_coord]
+    with cute.arch.elect_one():
+        cute.arch.mbarrier_init(s_mbar.iterator, 1)
 
-    blk_coord = (bidx, bidy)
-    gA_tile = cute.local_tile(tma_tensor_a, (32, 32), blk_coord)
-    gB_tile = cute.local_tile(tma_tensor_b, (32, 32), blk_coord)
+    copy_atom = cute.make_copy_atom(
+        cute.nvgpu.CopyUniversalOp(),
+        cutlass.Float32,
+    )
+
+    cute.arch.mbarrier_init_fence()
+    cute.arch.sync_threads()
+
+    gA_tile = cute.local_tile(tma_tensor_a, (32, 32), a_coord)
+    gB_tile = gB[b_coord]
+    tBgB = gB_tile[(None, tidx)]
+    tBrB = cute.make_rmem_tensor_like(tBgB)
 
     tAsA, tAgA = cpasync.tma_partition(
         tma_atom_a,
@@ -76,41 +77,29 @@ def kernel(tma_tensor_a, tma_tensor_b, tma_atom_a, tma_atom_b, smem_layout):
         cute.group_modes(gA_tile, 0, 2),
     )
 
-    tBsB, tBgB = cpasync.tma_partition(
-        tma_atom_b,
-        0,
-        cute.make_layout(1),
-        cute.group_modes(sA, 0, 2),
-        cute.group_modes(gB_tile, 0, 2),
+    with cute.arch.elect_one():
+        cute.arch.mbarrier_arrive_and_expect_tx(
+            s_mbar.iterator,
+            32 * 32 * 4,
+        )
+
+    cute.copy(
+        tma_atom_a,
+        tAgA,
+        tAsA,
+        tma_bar_ptr=s_mbar.iterator,
     )
 
-    with cute.arch.elect_one():
-        cute.copy(
-            tma_atom_a,
-            tAgA,
-            tAsA,
-        )
+    cute.arch.mbarrier_wait(s_mbar.iterator, phase=0)
 
-    cute.arch.cp_async_bulk_commit_group()
-    cute.arch.cp_async_bulk_wait_group(0, read=True)
-    cute.arch.sync_threads()
+    for i in cutlass.range_constexpr(32):
+        tBrB[i] = sA[tidx, i]
 
-    with cute.arch.elect_one():
-        cute.copy(
-            tma_atom_b, tBsB, tBgB,
-        )
-
-    cute.arch.cp_async_bulk_commit_group()
-    cute.arch.cp_async_bulk_wait_group(0, read=False)
-    # cute.arch.sync_threads()
-
-    # for i in cutlass.range_constexpr(32):
-    #     sA[i, tidx] = blkA[i, tidx]
-
-    # cute.arch.sync_threads()
-
-    # for i in cutlass.range_constexpr(32):
-    #     blkB[i, tidx] = sA[tidx, i]
+    cute.copy(
+        copy_atom,
+        tBrB,
+        tBgB,
+    )
 
 
 _compile_cache: dict = {}
