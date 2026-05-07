@@ -1,6 +1,8 @@
 # Blackwell MMA from scratch — following gau-nernst's tcgen05 walkthrough
 
-Reference: <https://gau-nernst.github.io/tcgen05/>
+References:
+- <https://gau-nernst.github.io/tcgen05/>
+- <https://research.colfax-intl.com/cutlass-tutorial-writing-gemm-kernels-using-tensor-memory-for-nvidia-blackwell-gpus/>
 
 ## Question
 
@@ -17,10 +19,14 @@ adding them one at a time, not by copying a full reference kernel.
 
 Single-tile BF16 GEMM:
 
-- `A`: `(M, K)` BF16 in GMEM (row-major).
-- `B`: `(K, N)` BF16 in GMEM (column-major or row-major — pick what
-  the MMA expects and document it).
-- `D`: `(M, N)` FP32 accumulator out (row-major).
+- `A`: `(M, K)` BF16 in GMEM, row-major (K contiguous, K-major).
+- `B`: `(K, N)` BF16 in GMEM, column-major (K contiguous, K-major).
+- `D`: `(M, N)` BF16 in GMEM, row-major. FP32 accumulator lives in
+  TMEM and is cast down to BF16 before the GMEM store.
+
+Both operands are K-major because the BF16 `tcgen05.mma` atoms expect
+the contraction dim contiguous in SMEM. (If your tutorial / atom
+choice expects MN-major, flip the strides and document it here.)
 
 Start with a single tile that the hardware can deliver in one
 `tcgen05.mma cta_group::1` instruction, e.g. `(M, N, K) = (128, 128, 64)`.

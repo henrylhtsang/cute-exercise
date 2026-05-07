@@ -4,6 +4,14 @@ This file is the host-side scaffolding (dtype/shape checks, from_dlpack
 conversion, compile cache). Fill in the @cute.jit and @cute.kernel
 bodies below as you walk through the tcgen05 tutorial:
 https://gau-nernst.github.io/tcgen05/
+
+Layouts:
+  A: (M, K) row-major  -> K is contiguous (K-major).
+  B: (K, N) column-major -> K is contiguous (K-major).
+  D: (M, N) row-major BF16.
+
+Both operands are K-major in storage; tcgen05 BF16 MMA atoms expect
+the contraction dim contiguous in SMEM.
 """
 import torch
 
@@ -29,7 +37,7 @@ def mma(A: cute.Tensor, B: cute.Tensor, D: cute.Tensor):
 @cute.kernel
 def kernel():
     # TODO: load A/B tile into SMEM (cp.async first, then TMA); allocate
-    # TMEM; issue tcgen05.mma; wait; copy TMEM -> RMEM -> GMEM.
+    # TMEM; issue tcgen05.mma; wait; copy TMEM -> RMEM -> BF16 -> GMEM.
     pass
 
 
@@ -43,13 +51,14 @@ def mma_interface(
 ) -> torch.Tensor:
     """Compute D = A @ B via the Blackwell tcgen05 MMA kernel.
 
-    Constraints (host-side, easy to relax later):
-    - BF16 inputs, FP32 output. CUDA, contiguous (row-major).
-    - 2-D inputs.
-    - M divisible by TILE_M, N by TILE_N, K by TILE_K.
+    Layout / dtype contract:
+    - A: (M, K) BF16, row-major (K contiguous).
+    - B: (K, N) BF16, column-major (K contiguous; stride (1, K)).
+    - D: (M, N) BF16, row-major. FP32 accumulator lives in TMEM and is
+      cast down to BF16 before the GMEM store.
+    - M % TILE_M == 0, N % TILE_N == 0, K % TILE_K == 0.
     """
-    assert a.is_cuda and a.is_contiguous(), "a must be cuda + contiguous"
-    assert b.is_cuda and b.is_contiguous(), "b must be cuda + contiguous"
+    assert a.is_cuda and b.is_cuda, "a, b must be cuda"
     assert a.dim() == 2 and b.dim() == 2, "expected 2-D tensors"
     assert a.dtype == torch.bfloat16, f"expected bf16 a, got {a.dtype}"
     assert b.dtype == torch.bfloat16, f"expected bf16 b, got {b.dtype}"
@@ -61,11 +70,16 @@ def mma_interface(
     assert N % TILE_N == 0, f"N must be divisible by {TILE_N}, got {N}"
     assert K % TILE_K == 0, f"K must be divisible by {TILE_K}, got {K}"
 
+    # A: row-major (M, K) — strides (K, 1).
+    assert a.stride() == (K, 1), f"a must be row-major, got stride {a.stride()}"
+    # B: column-major (K, N) — strides (1, K).
+    assert b.stride() == (1, K), f"b must be column-major, got stride {b.stride()}"
+
     if out is None:
-        out = torch.empty((M, N), device=a.device, dtype=torch.float32)
+        out = torch.empty((M, N), device=a.device, dtype=torch.bfloat16)
     else:
         assert out.shape == (M, N), f"out must be {(M, N)}, got {tuple(out.shape)}"
-        assert out.dtype == torch.float32, "out must be fp32"
+        assert out.dtype == torch.bfloat16, "out must be bf16"
         assert out.is_cuda and out.is_contiguous(), "out must be cuda + contiguous"
 
     a_ = from_dlpack(a, assumed_align=16)
