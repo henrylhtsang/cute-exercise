@@ -121,21 +121,31 @@ def kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma
 
     TILE_M, TILE_N, TILE_K = tiler
 
+    # SMEM tensors. smem_layout_{a,b} is a ComposedLayout — .outer is the
+    # logical layout, .inner is the swizzle the MMA atom expects.
+    # Shapes:
+    #   sA: (MMA_M, MMA_K, MMA_K_pieces, num_stages) = ((128,8), (16,4), 1, 1)-ish
+    #   sB: (MMA_N, MMA_K, MMA_K_pieces, num_stages)
+    #   sD: (tile_m, tile_n, epi_stages) = (128, 128, 1)
     smem = SmemAllocator()
     sA_tile = smem.allocate_tensor(element_type=cutlass.BFloat16, layout=smem_layout_a.outer, swizzle=smem_layout_a.inner)
     sB_tile = smem.allocate_tensor(element_type=cutlass.BFloat16, layout=smem_layout_b.outer, swizzle=smem_layout_b.inner)
-
     sD_tile = smem.allocate_tensor(cutlass.BFloat16, smem_layout_d.outer, swizzle=smem_layout_d.inner)
 
+    # Slice out the stage axis (single-stage, no pipelining yet).
     sA_tile = sA_tile[None, None, None, 0]
     sB_tile = sB_tile[None, None, None, 0]
 
+    # TMEM allocator scratch + a NamedBarrier the allocator uses to broadcast
+    # the retrieved TMEM base address to consumer threads.
     tmem_holding_buf = smem.allocate(cutlass.Int32, byte_alignment=4)
     tmem_alloc_barrier = pipeline.NamedBarrier(
         barrier_id=1,
         num_threads=128,
     )
 
+    # mbarriers: one per producer (TMA load A/B) + one for the MMA completion.
+    # Each is a single Int64 in SMEM, arrive_count=1.
     mbar_load_a = smem.allocate_tensor(cutlass.Int64, cute.make_layout(1), byte_alignment=8)
     mbar_load_b = smem.allocate_tensor(cutlass.Int64, cute.make_layout(1), byte_alignment=8)
     mbar_mma = smem.allocate_tensor(cutlass.Int64, cute.make_layout(1), byte_alignment=8)
@@ -144,15 +154,24 @@ def kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma
         cute.arch.mbarrier_init(mbar_load_b.iterator, 1)
         cute.arch.mbarrier_init(mbar_mma.iterator, 1)
 
+    # GMEM tiles for this CTA. local_tile picks (bidx, bidy, 0) from the
+    # tiled GMEM tensor; proj=1 keeps that mode, proj=None drops it.
+    #   gA_tile: (TILE_M, TILE_K) — A's M slice for this CTA.
+    #   gB_tile: (TILE_N, TILE_K) — B's N slice.
+    #   gD_tile: (TILE_M, TILE_N) — D's output tile.
     gA_tile = cute.local_tile(tma_tensor_a, tiler, (bidx, bidy, 0), proj=(1, None, 1))
     gB_tile = cute.local_tile(tma_tensor_b, tiler, (bidx, bidy, 0), proj=(None, 1, 1))
+    gD_tile = cute.local_tile(tma_tensor_d, tiler, (bidx, bidy, 0), proj=(1, 1, None))
 
+    # MMA-thread-aware partition (slice 0 = the one logical "MMA thread").
+    # tCgA / tCgB take the MMA atom's view of A/B in GMEM.
     thr_mma = tiled_mma.get_slice(0)
     tCgA = thr_mma.partition_A(gA_tile)
     tCgB = thr_mma.partition_B(gB_tile)
 
-    gD_tile = cute.local_tile(tma_tensor_d, tiler, (bidx, bidy, 0), proj=(1, 1, None))
-
+    # TMA partitions: collapse the per-MMA-fragment modes into a single
+    # "tile" mode (group_modes(..., 0, 3)) so the TMA atom sees one bulk
+    # transfer per call. tAsA/tBsB are SMEM dests; tAgA/tBgB are GMEM srcs.
     tAsA, tAgA = cpasync.tma_partition(
         tma_atom_a,
         0,
@@ -167,6 +186,7 @@ def kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma
         cute.group_modes(sB_tile, 0, 3),
         cute.group_modes(tCgB, 0, 3),
     )
+    # D-side TMA store: full (TILE_M, TILE_N) tile, one bulk transfer.
     sD_for_tma = sD_tile[None, None, 0]
     tDsD, tDgD = cpasync.tma_partition(
         tma_atom_d,
@@ -177,10 +197,12 @@ def kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma
     )
 
 
-    # fence
+    # Make mbarrier_init writes visible to all threads in the CTA.
     cute.arch.mbarrier_init_fence()
     cute.arch.sync_threads()
 
+    # Tell each load mbarrier how many bytes the upcoming TMA will deliver,
+    # so mbarrier_wait knows when the transfer is complete.
     if tidx == 0:
         cute.arch.mbarrier_arrive_and_expect_tx(
             mbar_load_a.iterator, cute.size_in_bytes(cutlass.BFloat16, smem_layout_a),
@@ -207,6 +229,8 @@ def kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma
     cute.arch.mbarrier_wait(mbar_load_b.iterator, phase=0)
 
 
+    # Allocate 128 TMEM columns for the FP32 accumulator. Warp 0 issues the
+    # allocation; the other warps wait_for_alloc then retrieve the base ptr.
     tmem = TmemAllocator(
         tmem_holding_buf,
         barrier_for_retrieve=tmem_alloc_barrier,
@@ -217,11 +241,15 @@ def kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma
     tmem.wait_for_alloc()
     tmem_ptr = tmem.retrieve_ptr(cutlass.Float32)
 
+    # Build a tensor view of the TMEM accumulator with the MMA atom's expected
+    # layout. acc_shape is ((MMA_M, MMA_N), 1, 1) — the (1,1) are tile-iter
+    # modes that stay 1 here (single tile, no K loop yet).
     acc_shape = tiled_mma.partition_shape_C((TILE_M, TILE_N))
     tCtAcc_fake = tiled_mma.make_fragment_C(acc_shape)
     tCtAcc = cute.make_tensor(tmem_ptr, tCtAcc_fake.layout)
-    tiled_mma.set(tcgen05.Field.ACCUMULATE, False)
+    tiled_mma.set(tcgen05.Field.ACCUMULATE, False)  # first MMA: D = A @ B (no +=)
 
+    # MMA-side fragment views of the SMEM A/B tiles (descriptor encoding).
     thr_mma = tiled_mma.get_slice(0)
     tCrA = thr_mma.make_fragment_A(sA_tile)
     tCrB = thr_mma.make_fragment_B(sB_tile)
@@ -235,12 +263,16 @@ def kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma
         tCtAcc,  # C (acc in)
     )
 
+    # Signal MMA completion on mbar_mma, then everyone waits on it before
+    # reading the TMEM accumulator.
     if cute.arch.warp_idx() == 0:
         with cute.arch.elect_one():
             cute.nvgpu.tcgen05.commit(mbar_mma.iterator)
 
     cute.arch.mbarrier_wait(mbar_mma.iterator, phase=0)
 
+    # Epilogue: TMEM -> RMEM (t2r) -> cast to BF16 -> SMEM (r2s) -> GMEM (TMA).
+    # epi_tile=(TILE_M, TILE_N) means one shot, no chunking.
     copy_atom_t2r = sm100_utils.get_tmem_load_op(
         cta_tile_shape=(TILE_M, TILE_N, TILE_K),
         layout_d=LayoutEnum.ROW_MAJOR,
@@ -249,10 +281,14 @@ def kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma
         epi_tile=(TILE_M, TILE_N),
         use_2cta_instrs=False,
     )
+    # Drop the ((MMA_M,MMA_N), 1, 1) outer tile axes — single tile.
     tCtAcc_full = tCtAcc[((None, None), 0, 0)]
     tiled_copy_t2r = tcgen05.make_tmem_copy(copy_atom_t2r, tCtAcc_full)
     thr_copy_t2r = tiled_copy_t2r.get_slice(tidx)
 
+    # Per-thread t2r partitions:
+    #   tTR_tAcc: this thread's slice of the TMEM acc (source).
+    #   tTR_cAcc: identity coords (only used to size the RMEM buffer).
     tTR_tAcc = thr_copy_t2r.partition_S(tCtAcc_full)
     tTR_cAcc = thr_copy_t2r.partition_D(
         cute.make_identity_tensor(tCtAcc_full.shape)
@@ -260,6 +296,8 @@ def kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma
     tTR_rAcc = cute.make_rmem_tensor(tTR_cAcc.shape, cutlass.Float32)
     tTR_rAcc_bf16 = cute.make_rmem_tensor(tTR_rAcc.shape, cutlass.BFloat16)
 
+    # r2s atom is paired with the t2r layout (so the SMEM write pattern
+    # matches the RMEM register layout produced by t2r).
     copy_atom_r2s = sm100_utils.get_smem_store_op(
         layout_d=LayoutEnum.ROW_MAJOR,
         elem_ty_d=cutlass.BFloat16,
@@ -271,10 +309,12 @@ def kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma
     tRS_sD = thr_copy_r2s.partition_D(sD_for_tma)
     tRS_rD = tiled_copy_r2s.retile(tTR_rAcc_bf16)
 
+    # Pipeline: t2r -> FP32->BF16 cast -> r2s.
     cute.copy(tiled_copy_t2r, tTR_tAcc, tTR_rAcc)
     tTR_rAcc_bf16.store(tTR_rAcc.load().to(cutlass.BFloat16))
     cute.copy(tiled_copy_r2s, tRS_rD, tRS_sD)
 
+    # Make SMEM writes visible to the TMA proxy, then warp 0 issues the store.
     cute.arch.fence_proxy("async.shared", space="cta")
     cute.arch.sync_threads()
     if cute.arch.warp_idx() == 0:
