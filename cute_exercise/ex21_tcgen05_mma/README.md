@@ -1,5 +1,11 @@
 # Blackwell MMA from scratch — following gau-nernst's tcgen05 walkthrough
 
+> **Status: in progress, not passing.** `test_mma.py` currently fails — the
+> kernel compiles and runs end-to-end, but `D` does not match
+> `torch.matmul` (broadcast pattern across cols 0..63, zeros for cols
+> 64..127, suspected SMEM B layout / TMA-load issue).
+
+
 References:
 - <https://gau-nernst.github.io/tcgen05/>
 - <https://research.colfax-intl.com/cutlass-tutorial-writing-gemm-kernels-using-tensor-memory-for-nvidia-blackwell-gpus/>
