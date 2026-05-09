@@ -48,7 +48,9 @@ def mma(A: cute.Tensor, B: cute.Tensor, D: cute.Tensor):
     grid = (cute.ceil_div(M, tile_m), cute.ceil_div(N, tile_n), 1)
 
 
-    # alloc tmem
+    # tiled_mma: the SM100 tcgen05 BF16 MMA atom for one (TILE_M, TILE_N, TILE_K)
+    # tile, accumulating into FP32 in TMEM. K-major for both operands matches
+    # how A/B are stored in GMEM.
     tiled_mma = sm100_utils.make_trivial_tiled_mma(
         ab_dtype=cutlass.BFloat16,
         a_leading_mode=tcgen05.OperandMajorMode.K,
@@ -58,20 +60,26 @@ def mma(A: cute.Tensor, B: cute.Tensor, D: cute.Tensor):
         mma_tiler_mn=(TILE_M, TILE_N),
     )
 
+    # SMEM operand layouts the MMA atom expects (with the right swizzle baked
+    # in). Returned as ComposedLayout: .outer = layout, .inner = swizzle.
     smem_layout_a = sm100_utils.make_smem_layout_a(
         tiled_mma, tiler, cutlass.BFloat16, num_stages=1
     )
     smem_layout_b = sm100_utils.make_smem_layout_b(
         tiled_mma, tiler, cutlass.BFloat16, num_stages=1
     )
-    epi_tile_mn = (tile_m, 32)
+    # SMEM layout for D — full (tile_m, tile_n) staging buffer, written in
+    # one TMEM->RMEM->SMEM->GMEM pass.
     smem_layout_d = sm100_utils.make_smem_layout_epi(
         cutlass.BFloat16,
         LayoutEnum.ROW_MAJOR,
-        epi_tile_mn,
+        (tile_m, tile_n),
         1,                    # epi_stage
     )
 
+    # TMA atoms: GMEM<->SMEM bulk copies. A/B use the MMA-aware builders so
+    # the TMA descriptor matches the operand SMEM layouts above; D uses the
+    # generic store builder against the full (tile_m, tile_n) tile.
     tma_load_op = cpasync.CopyBulkTensorTileG2SOp(tcgen05.CtaGroup.ONE)
     tma_atom_a, tma_tensor_a = cute.nvgpu.make_tiled_tma_atom_A(
         tma_load_op,
@@ -96,16 +104,16 @@ def mma(A: cute.Tensor, B: cute.Tensor, D: cute.Tensor):
         tma_store_op,
         D,
         cute.select(smem_layout_d, mode=[0, 1]),
-        epi_tile_mn,
+        (tile_m, tile_n),
     )
 
-    kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma_atom_d, tiled_mma, smem_layout_a, smem_layout_b, smem_layout_d, tiler, epi_tile_mn,).launch(
+    kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma_atom_d, tiled_mma, smem_layout_a, smem_layout_b, smem_layout_d, tiler,).launch(
         grid=grid,
         block=block,
     )
 
 @cute.kernel
-def kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma_atom_d, tiled_mma, smem_layout_a, smem_layout_b, smem_layout_d, tiler: cutlass.Constexpr, epi_tile_mn: cutlass.Constexpr):
+def kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma_atom_d, tiled_mma, smem_layout_a, smem_layout_b, smem_layout_d, tiler: cutlass.Constexpr):
     # TODO: load A/B tile into SMEM (cp.async first, then TMA); allocate
     # TMEM; issue tcgen05.mma; wait; copy TMEM -> RMEM -> BF16 -> GMEM.
     tidx, _, _ = cute.arch.thread_idx()
@@ -159,14 +167,13 @@ def kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma
         cute.group_modes(sB_tile, 0, 3),
         cute.group_modes(tCgB, 0, 3),
     )
-    gD_epi = cute.flat_divide(gD_tile, epi_tile_mn)
     sD_for_tma = sD_tile[None, None, 0]
     tDsD, tDgD = cpasync.tma_partition(
         tma_atom_d,
         0,
         cute.make_layout(1),
         cute.group_modes(sD_for_tma, 0, 2),
-        cute.group_modes(gD_epi, 0, 2),
+        cute.group_modes(gD_tile, 0, 2),
     )
 
 
@@ -239,22 +246,18 @@ def kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma
         layout_d=LayoutEnum.ROW_MAJOR,
         elem_ty_d=cutlass.BFloat16,
         elem_ty_acc=cutlass.Float32,
-        epi_tile=epi_tile_mn,
+        epi_tile=(TILE_M, TILE_N),
         use_2cta_instrs=False,
     )
-    tCtAcc_epi = cute.flat_divide(
-        tCtAcc[((None, None), 0, 0)], epi_tile_mn
-    )
-    tiled_copy_t2r = tcgen05.make_tmem_copy(copy_atom_t2r, tCtAcc_epi[None, None, 0, 0])
+    tCtAcc_full = tCtAcc[((None, None), 0, 0)]
+    tiled_copy_t2r = tcgen05.make_tmem_copy(copy_atom_t2r, tCtAcc_full)
     thr_copy_t2r = tiled_copy_t2r.get_slice(tidx)
 
-    tTR_tAcc = thr_copy_t2r.partition_S(tCtAcc_epi)
+    tTR_tAcc = thr_copy_t2r.partition_S(tCtAcc_full)
     tTR_cAcc = thr_copy_t2r.partition_D(
-        cute.make_identity_tensor(tCtAcc_epi.shape)
+        cute.make_identity_tensor(tCtAcc_full.shape)
     )
-    tTR_rAcc = cute.make_rmem_tensor(
-        tTR_cAcc[None, None, None, 0, 0].shape, cutlass.Float32
-    )
+    tTR_rAcc = cute.make_rmem_tensor(tTR_cAcc.shape, cutlass.Float32)
     tTR_rAcc_bf16 = cute.make_rmem_tensor(tTR_rAcc.shape, cutlass.BFloat16)
 
     copy_atom_r2s = sm100_utils.get_smem_store_op(
@@ -265,22 +268,17 @@ def kernel(tma_tensor_a, tma_tensor_b, tma_tensor_d, tma_atom_a, tma_atom_b, tma
     )
     tiled_copy_r2s = cute.make_tiled_copy_D(copy_atom_r2s, tiled_copy_t2r)
     thr_copy_r2s = tiled_copy_r2s.get_slice(tidx)
-    tRS_sD = thr_copy_r2s.partition_D(sD_tile)
+    tRS_sD = thr_copy_r2s.partition_D(sD_for_tma)
     tRS_rD = tiled_copy_r2s.retile(tTR_rAcc_bf16)
 
-    tTR_tAcc_i = tTR_tAcc[None, None, None, 0, 0]
-    cute.copy(tiled_copy_t2r, tTR_tAcc_i, tTR_rAcc)
+    cute.copy(tiled_copy_t2r, tTR_tAcc, tTR_rAcc)
     tTR_rAcc_bf16.store(tTR_rAcc.load().to(cutlass.BFloat16))
-    cute.copy(tiled_copy_r2s, tRS_rD, tRS_sD[None, None, None, 0])
+    cute.copy(tiled_copy_r2s, tRS_rD, tRS_sD)
 
     cute.arch.fence_proxy("async.shared", space="cta")
     cute.arch.sync_threads()
     if cute.arch.warp_idx() == 0:
-        cute.copy(
-            tma_atom_d,
-            tDsD,
-            tDgD[None, 0, 0],
-        )
+        cute.copy(tma_atom_d, tDsD, tDgD)
         cute.arch.cp_async_bulk_commit_group()
     cute.arch.cp_async_bulk_wait_group(0)
     cute.arch.sync_threads()
