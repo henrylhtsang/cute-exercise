@@ -7,8 +7,12 @@ https://gau-nernst.github.io/tcgen05/
 
 Layouts:
   A: (M, K) row-major  -> K is contiguous (K-major).
-  B: (K, N) column-major -> K is contiguous (K-major).
+  B: (N, K) row-major  -> K is contiguous (K-major).
   D: (M, N) row-major BF16.
+
+B follows the CuTe MMA-B canonical mode order: mode 0 = N, mode 1 = K.
+`make_tiled_tma_atom_B` tiles the GMEM tensor's mode 0 with TILE_N and
+mode 1 with TILE_K, so passing B as (K, N) would mis-tile the load.
 
 Both operands are K-major in storage; tcgen05 BF16 MMA atoms expect
 the contraction dim contiguous in SMEM.
@@ -337,8 +341,10 @@ def mma_interface(
     """Compute D = A @ B via the Blackwell tcgen05 MMA kernel.
 
     Layout / dtype contract:
-    - A: (M, K) BF16, row-major (K contiguous).
-    - B: (K, N) BF16, column-major (K contiguous; stride (1, K)).
+    - A: (M, K) BF16, row-major (K contiguous; stride (K, 1)).
+    - B: (N, K) BF16, row-major (K contiguous; stride (K, 1)). This is
+      the CuTe MMA-B canonical mode order — mode 0 = N, mode 1 = K — so
+      `make_tiled_tma_atom_B` tiles the right axes.
     - D: (M, N) BF16, row-major. FP32 accumulator lives in TMEM and is
       cast down to BF16 before the GMEM store.
     - M % TILE_M == 0, N % TILE_N == 0, K % TILE_K == 0.
@@ -349,7 +355,7 @@ def mma_interface(
     assert b.dtype == torch.bfloat16, f"expected bf16 b, got {b.dtype}"
 
     M, K = a.shape
-    K2, N = b.shape
+    N, K2 = b.shape
     assert K == K2, f"K mismatch: a is {a.shape}, b is {b.shape}"
     assert M % TILE_M == 0, f"M must be divisible by {TILE_M}, got {M}"
     assert N % TILE_N == 0, f"N must be divisible by {TILE_N}, got {N}"
@@ -357,8 +363,8 @@ def mma_interface(
 
     # A: row-major (M, K) — strides (K, 1).
     assert a.stride() == (K, 1), f"a must be row-major, got stride {a.stride()}"
-    # B: column-major (K, N) — strides (1, K).
-    assert b.stride() == (1, K), f"b must be column-major, got stride {b.stride()}"
+    # B: row-major (N, K) — strides (K, 1). K-major (contraction dim contiguous).
+    assert b.stride() == (K, 1), f"b must be K-major (N, K), got stride {b.stride()}"
 
     if out is None:
         out = torch.empty((M, N), device=a.device, dtype=torch.bfloat16)
