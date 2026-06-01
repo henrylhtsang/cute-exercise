@@ -51,3 +51,4 @@ subdirectory contains:
 17. [How does TMA work when one stride needs to be dynamic?](cute_exercise/ex17_tma_dynamic_stride/)
 18. [Does TMA multicast actually save bandwidth on a memory-bound op?](cute_exercise/ex18_tma_multicast/)
 19. [How does 2-CTA MMA (`tcgen05.mma cta_group::2`) work, and when does it help?](cute_exercise/ex19_2cta_mma/)
+22. [Can I fuse two kernels into one with a grid-wide barrier?](cute_exercise/ex22_grid_sync/)
