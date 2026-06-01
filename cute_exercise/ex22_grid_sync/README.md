@@ -252,3 +252,64 @@ For each variant, at `N ∈ {256 Ki, 4 Mi, 64 Mi, 256 Mi}`:
   (V1/V2 without the V4 resident trick), fusion saves only the launch
   gap but pays the cooperative occupancy tax. Is there an `N` where
   V0/V3 actually beat V1? Document it.
+
+## Implementation notes & results (V0 + V1)
+
+`kernel.py` implements V0 (`variant="two_launch"`) and V1
+(`variant="grid_sync"`) for global RMS-normalize. `test_grid_sync.py`
+checks both against PyTorch; `bench.py` compares them. Measured on a
+GB200 (`CUDA_VISIBLE_DEVICES=1`), persistent grid = `#SMs` CTAs (152
+here), 1 CTA/SM, 256 threads.
+
+**The grid barrier.** CuTe DSL has no `grid.sync()`, so V1 hand-rolls
+one (single-shot arrival counter, the `this_grid().sync()` shape):
+```
+sync_threads(); fence_acq_rel_gpu()
+if tid == 0:
+    atomic_add(bar_ptr.llvm_ptr, 1, sem="release", scope="gpu")   # arrive
+    while ld_acquire_gpu(bar_ptr) != gridDim: pass                # spin
+sync_threads()
+```
+`ld_acquire_gpu` is inline PTX (`ld.global.acquire.gpu.b32`), adapted
+from `flash_attn/cute/barrier.py`. The arrive side reuses
+`cute.arch.atomic_add(..., sem="release", scope="gpu")`. Phase 1's
+per-warp `atomic_add` into the global sum-of-squares uses
+`sem="relaxed"`; the `fence_acq_rel_gpu` before arrival is what makes
+those writes visible grid-wide after the barrier.
+
+**It works and is correct.** Both variants match PyTorch to fp32
+tolerance for `N` from 256 Ki to 64 Mi. The cooperative launch
+(`grid = 152`, 1 CTA/SM) is well within co-resident capacity, so the
+barrier never deadlocks at runtime.
+
+**Perf verdict: fusion does NOT win here — exactly as hypothesized.**
+At `N ≥ 16 Mi` both variants are DRAM-bandwidth-bound and *identical*
+(~510–630 GB/s; fused saves <0.1 %, in the noise). At small `N` the
+~100 µs host-dispatch floor swamps the launch gap, so the ~5–9 µs
+fused saving is also in the noise. The reason is structural: **V1's
+phase 2 still re-reads `x` from DRAM**, so V0 and V1 move the *same*
+bytes (read `x` twice + write `out`). A grid barrier removes the
+second *launch*, not the second *read*. To actually win you need V4 —
+keep each CTA's slab of `x` resident in registers/SMEM across the
+barrier so phase 2 skips the reload. That's the next step.
+
+**Three gotchas worth recording:**
+1. `from_dlpack` bakes the tensor *shape* statically into the compiled
+   kernel, so a kernel compiled for one `N` silently processes only the
+   first `N` elements when reused for a larger tensor. The compile
+   cache key **must** include `x.numel()`.
+2. `cute.arch.atomic_add` wants an `ir.Value`, not a `cute.Pointer` —
+   pass `ptr.llvm_ptr` (the `Pointer` class exposes `llvm_ptr` but not
+   the `to_llvm_ptr` that `_normalize_ptr` looks for).
+3. **Cooperative kernels don't play with `torch.cuda.graph`.** Wrapping
+   V1 in a CUDA-graph capture hangs; capturing V0 returns bogus
+   constant device times (the DSL launches on a stream torch's capture
+   isn't watching). So fusing with a grid barrier also gives up
+   CUDA-graph launch-overhead amortization — a real cost when the whole
+   point was to cut launch overhead.
+
+**Still TODO:** V2 (compare FA-flag vs arrival-counter barrier — V1 is
+already the counter form), V3 (PDL via `griddepcontrol`), V4 (resident
+reuse across the barrier — the variant that should actually win), and a
+lower-overhead/NCU-based measurement to pull the launch gap out of the
+host-dispatch noise.
