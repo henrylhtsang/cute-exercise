@@ -56,3 +56,4 @@ subdirectory contains:
 24. [How do I write a fast LayerNorm for different sizes?](cute_exercise/ex24_layernorm/)
 25. [How do I write a fused MoE kernel?](cute_exercise/ex25_fused_moe/)
 26. [How do I write a top-k kernel?](cute_exercise/ex26_topk/)
+27. [Do 256-bit PTX global loads actually coalesce?](cute_exercise/ex27_256bit_load/)
