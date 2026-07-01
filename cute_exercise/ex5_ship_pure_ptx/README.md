@@ -150,6 +150,16 @@ then serve all `(M, N)` divisible by the tile, but Python has to
 hand-pack that struct — fragile. We took the simpler path and let the
 artifact filename carry the shape.
 
+**Future work: arbitrary shapes.** The PTX-shipping workflow is still
+compatible with dynamic shapes, but the shipped artifact would need a
+different ABI. Instead of baking `(M, N)` and fixed grid dimensions into
+the artifact, generate PTX from a dynamic-layout CuTe kernel, store tile
+geometry (for example `tile_m`, `tile_n`, `block`) in the manifest, and
+compute `grid = ceil_div(M, tile_m) * ceil_div(N, tile_n)` at runtime.
+The hard part is packing the dynamic CuTe tensor descriptors exactly as
+the generated `.entry` expects; the lower-level driver load/cache/launch
+path in `ptx_runner.py` can remain the same.
+
 **Is there an official CuTe helper for "compile once, ship later"?** Yes,
 but it ships **cubin** (not PTX) wrapped in a `.o` file together with a
 generated host launch entry:
