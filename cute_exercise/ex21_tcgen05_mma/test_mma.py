@@ -1,8 +1,8 @@
 """Single-tile BF16 MMA test. Compares D = A @ B against torch.matmul.
 
 Layouts:
-  A: (M, K) BF16 row-major.
-  B: (K, N) BF16 column-major.
+  A: (M, K) BF16 row-major (K-major).
+  B: (N, K) BF16 row-major (K-major) — CuTe MMA-B canonical form.
   D: (M, N) BF16 row-major.
 """
 import torch
@@ -17,10 +17,9 @@ from cute_exercise.ex21_tcgen05_mma.kernel import (
 
 def make_inputs(M: int, N: int, K: int):
     a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
-    # Column-major (K, N): allocate (N, K) row-major, transpose to a (K, N)
-    # view with stride (1, K).
-    b = torch.randn(N, K, device="cuda", dtype=torch.bfloat16).T
-    assert b.shape == (K, N) and b.stride() == (1, K)
+    # CuTe MMA-B canonical form: shape (N, K), K-major (stride (K, 1)).
+    b = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
+    assert b.shape == (N, K) and b.stride() == (K, 1)
     return a, b
 
 
@@ -33,9 +32,10 @@ def main():
     mma_interface(a, b, out=d)
     torch.cuda.synchronize()
 
-    expected = (a.float() @ b.float()).to(torch.bfloat16)
+    # b is (N, K); reference matmul needs (K, N), so transpose for the ref.
+    expected = (a.float() @ b.float().T).to(torch.bfloat16)
     print(f"a ({M}x{K}):\n{a}")
-    print(f"b ({K}x{N}):\n{b}")
+    print(f"b ({N}x{K}):\n{b}")
     print(f"d ({M}x{N}):\n{d}")
     print(f"expected:\n{expected}")
 
