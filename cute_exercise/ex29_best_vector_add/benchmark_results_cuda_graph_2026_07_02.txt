@@ -1,0 +1,72 @@
+Command:
+
+  python -m cute_exercise.ex29_best_vector_add.bench --warmup 5 --iters 20 --runs 3 --emit-dispatch
+
+Hardware:
+
+  NVIDIA GB200, 152 SMs
+
+Mode:
+
+  CUDA graph replay timings. Python/CUDA launch overhead is excluded.
+  Winners below are selected from VectorAdd configs only; torch.add is shown as
+  a reference but is not part of DEFAULT_DISPATCH.
+
+=== N=1024 (1,048,576 fp16 elements) ===
+ptx_h2_v4_fma_mix            9.120 us      689.9 GB/s
+dsl_vectorized_t512          9.248 us      680.3 GB/s
+torch.add                    9.328 us      674.5 GB/s
+ptx_h2_v4_cs_t512_one_tile   9.344 us      673.3 GB/s
+
+=== N=2048 (4,194,304 fp16 elements) ===
+dsl_vectorized_t512          9.408 us     2674.9 GB/s
+ptx_h2_v4_fma_mix            9.440 us     2665.9 GB/s
+ptx_h2_v8_noalloc_persistent_x3_full   9.584 us     2625.8 GB/s
+torch.add                    9.712 us     2591.2 GB/s
+
+=== N=4096 (16,777,216 fp16 elements) ===
+ptx_h2_v8_noalloc_one_tile   14.224 us     7077.0 GB/s
+ptx_h2_v8_noalloc_tiles4    14.960 us     6728.8 GB/s
+ptx_h2_v8_noalloc_persistent_x3_full  15.104 us     6664.7 GB/s
+torch.add                   18.256 us     5514.0 GB/s
+
+=== N=8192 (67,108,864 fp16 elements) ===
+ptx_h2_v4_cs_t512_one_tile  59.328 us     6786.9 GB/s
+ptx_h2_scalar_one_tile_fma_unroll4    61.312 us     6567.3 GB/s
+torch.add                   61.344 us     6563.9 GB/s
+ptx_h2_v8_noalloc_one_tile  61.344 us     6563.9 GB/s
+
+=== N=16384 (268,435,456 fp16 elements) ===
+ptx_h2_scalar_one_tile_fma_unroll4   223.136 us     7218.1 GB/s
+ptx_h2_v4_cs_t512_one_tile           223.136 us     7218.1 GB/s
+torch.add                 224.416 us     7176.9 GB/s
+ptx_h2_v8_noalloc_tiles4  229.280 us     7024.7 GB/s
+ptx_h2_v8_noalloc_persistent_x3_full 231.280 us     6963.9 GB/s
+
+DEFAULT_DISPATCH = {
+    1024: "ptx_h2_v4_fma_mix",
+    2048: "dsl_vectorized_t512",
+    4096: "ptx_h2_v8_noalloc_one_tile",
+    8192: "ptx_h2_v4_cs_t512_one_tile",
+    16384: "ptx_h2_scalar_one_tile_fma_unroll4",
+}
+
+Notes:
+
+  The winning large-shape config intentionally launches one CTA per 1024 fp16
+  elements, matching torch.add's high block count for N=16384. Earlier
+  persistent 2x/3x/4x/6x/8x/10x/12x SM-count grids used fewer blocks and lower
+  achieved occupancy, and did not beat torch.add on this GB200.
+
+Focused scalar-ordering rerun after adding alignment/store/order variants:
+
+Command:
+
+  python -m cute_exercise.ex29_best_vector_add.bench --size 16384 --warmup 3 --iters 20 --runs 2 --emit-dispatch
+
+=== N=16384 (268,435,456 fp16 elements, CUDA graph replay) ===
+ptx_h2_scalar_one_tile_fma_unroll4                 221.120 us     7283.9 GB/s
+ptx_h2_scalar_one_tile_fma_unroll4_loads_first     221.120 us     7283.9 GB/s
+ptx_h2_scalar_one_tile_fma_unroll4_bundle          221.352 us     7276.3 GB/s
+ptx_h2_scalar_one_tile_fma_unroll4_a128            221.760 us     7262.9 GB/s
+torch.add                                          223.136 us     7218.1 GB/s

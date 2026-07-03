@@ -1,0 +1,58 @@
+Command:
+
+  ncu --profile-from-start off --target-processes all \
+      --section LaunchStats --section Occupancy --section SpeedOfLight \
+      --section MemoryWorkloadAnalysis --section InstructionStats \
+      --section SourceCounters ...
+
+Hardware:
+
+  NVIDIA GB200, 152 SMs
+
+Reports:
+
+  torch_add_N16384.ncu-rep
+  vector_scalar_one_tile_N16384.ncu-rep
+
+Metric summary:
+
+  torch.add:
+    kernel: vectorized_elementwise_kernel
+    duration: 221.504 us
+    grid: 262144 CTAs
+    block: 128 threads
+    registers/thread: 40
+    theoretical occupancy: 75.00%
+    achieved occupancy: 62.90%
+    DRAM throughput: 90.04%
+    memory throughput: 7.137 TB/s
+    L2 hit rate: 0.00%
+
+  VectorAdd ptx_h2_scalar_one_tile_fma_unroll4:
+    kernel: kernel_cutlass_kernel_...
+    duration: 226.016 us
+    grid: 262144 CTAs
+    block: 128 threads
+    registers/thread: 18
+    theoretical occupancy: 100.00%
+    achieved occupancy: 87.62%
+    DRAM throughput: 88.07%
+    memory throughput: 6.981 TB/s
+    L2 hit rate: 14.75%
+
+SASS notes:
+
+  torch.add uses scalar half loads/stores (`LDG.E.U16`, `STG.E.U16`) plus
+  promoted math (`HADD2.F32`, `FFMA`) in its vectorized elementwise kernel.
+
+  VectorAdd uses scalar 32-bit global loads/stores (`LDG.E`, `STG.E`) carrying
+  two fp16 values per register and inline half2 math (`HFMA2`/`HADD2` in SASS).
+
+Interpretation:
+
+  The previous persistent v8 kernels had low achieved occupancy because they
+  launched only a small multiple of SM-count CTAs. The one-tile scalar half2
+  config launches the same 262144 CTAs as torch.add for N=16384 and has much
+  lower register pressure, which is why it is the current graph-timing winner.
+  NCU multi-pass duration still slightly favors torch.add, so CUDA graph replay
+  remains the benchmark source of truth for the exercise timing target.

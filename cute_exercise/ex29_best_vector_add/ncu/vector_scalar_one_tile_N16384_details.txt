@@ -1,0 +1,121 @@
+[1269267] python3.12@127.0.0.1
+  kernel_cutlass_kernel_cute_exerciseex29_best_vector_addkernelVectorAdd_object_at__tensorptrf16_gmem_align16_o_102426214411024_tensorptrf16_gmem_align16_o_102426214411024_tensorptrf16_gmem_0 (262144, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 10.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- -------------
+    Metric Name             Metric Unit  Metric Value
+    ----------------------- ----------- -------------
+    DRAM Frequency                   hz 3995186181.51
+    SM Frequency                     hz 1902928332.51
+    Elapsed Cycles                cycle     434638.00
+    Memory Throughput                 %         88.07
+    DRAM Throughput                   %         88.07
+    Duration                         ns     226016.00
+    L1/TEX Cache Throughput           %         89.63
+    L2 Cache Throughput               %         49.87
+    SM Active Cycles              cycle     423192.61
+    Compute (SM) Throughput           %         20.82
+    ----------------------- ----------- -------------
+
+    INF   This workload is utilizing greater than 80.0% of the available compute or memory performance of this device.
+          To further improve performance, work will likely need to be shifted from the most utilized to another unit.
+          Start by analyzing DRAM in the Memory Workload Analysis section.
+
+    Section: Memory Workload Analysis
+    --------------------------------------- ----------- ----------------
+    Metric Name                             Metric Unit     Metric Value
+    --------------------------------------- ----------- ----------------
+    Local Memory Spilling Requests                                  0.00
+    Local Memory Spilling Request Overhead            %             0.00
+    L2 Sector Promotion Misses                        %             0.00
+    Shared Memory Spilling Requests                                 0.00
+    Shared Memory Spilling Request Overhead           %             0.00
+    Memory Throughput                            byte/s 6980773042616.45
+    Mem Busy                                          %            88.05
+    Max Bandwidth                                     %            88.07
+    L1/TEX Hit Rate                                   %            74.18
+    L2 Persisting Size                             byte      25411584.00
+    L2 Compression Success Rate                       %             0.00
+    L2 Compression Ratio                              %             0.00
+    L2 Compression Input Sectors                 sector       2619782.00
+    L2 Hit Rate                                       %            14.75
+    Mem Pipes Busy                                    %            20.82
+    --------------------------------------- ----------- ----------------
+
+    Section: Instruction Statistics
+    ---------------------------------------- ----------- ------------
+    Metric Name                              Metric Unit Metric Value
+    ---------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                  byte         0.00
+    Shared Memory Spilling Requests                 byte         0.00
+    Avg. Executed Instructions Per Scheduler        inst     62086.74
+    Executed Instructions                           inst  37748736.00
+    Avg. Issued Instructions Per Scheduler          inst     62086.74
+    Issued Instructions                             inst  37748736.00
+    ---------------------------------------- ----------- ------------
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                128.00
+    Cluster Scheduling Policy                           PolicySpread
+    Cluster Size                                                0.00
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                              262144.00
+    Preferred Cluster Size                                      0.00
+    Registers Per Thread             register/thread           18.00
+    Shared Memory Configuration Size            byte        32768.00
+    Driver Shared Memory Per Block        byte/block         1024.00
+    Dynamic Shared Memory Per Block       byte/block            0.00
+    Static Shared Memory Per Block        byte/block            0.00
+    # SMs                                         SM          152.00
+    Stack Size                                               1024.00
+    Threads                                   thread     33554432.00
+    # TPCs                                                     76.00
+    Enabled TPC IDs                                              all
+    Uses Green Context                                          0.00
+    Waves Per SM                                              107.79
+    -------------------------------- --------------- ---------------
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster         0.00
+    Max Cluster Size                      block        16.00
+    Overall GPU Occupancy                     %         0.00
+    Cluster Occupancy                         %         0.00
+    Block Limit Barriers                  block        32.00
+    Block Limit SM                        block        32.00
+    Block Limit Registers                 block        21.00
+    Block Limit Shared Mem                block        32.00
+    Block Limit Warps                     block        16.00
+    Theoretical Active Warps per SM        warp        64.00
+    Theoretical Occupancy                     %       100.00
+    Achieved Occupancy                        %        87.62
+    Achieved Active Warps Per SM           warp        56.08
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 12.38%
+          The difference between calculated theoretical (100.0%) and measured achieved occupancy (87.6%) can be the
+          result of warp scheduling overheads or workload imbalances during the kernel execution. Load imbalances can
+          occur between warps within a block as well as across blocks of the same kernel. See the CUDA Best Practices
+          Guide (https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#occupancy) for more details on
+          optimizing occupancy.
+
+    Section: Source Counters
+    ------------------------- ----------- ------------
+    Metric Name               Metric Unit Metric Value
+    ------------------------- ----------- ------------
+    Branch Instructions Ratio           %         0.03
+    Branch Instructions              inst   1048576.00
+    Branch Efficiency                   %         0.00
+    Avg. Divergent Branches      branches         0.00
+    ------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 72.56%
+          This workload has uncoalesced global accesses resulting in a total of 150994944 excessive sectors (75% of the
+          total 201326592 sectors). Check the L2 Theoretical Sectors Global Excessive table for the primary source
+          locations. The CUDA Programming Guide
+          (https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#device-memory-accesses) has additional
+          information on reducing uncoalesced device memory accesses.
