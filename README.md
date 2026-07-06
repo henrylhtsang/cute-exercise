@@ -59,3 +59,4 @@ subdirectory contains:
 27. [Do 256-bit PTX global loads actually coalesce?](cute_exercise/ex27_256bit_load/)
 28. [How do I inspect the embedded CuTe DSL CUDA compiler?](cute_exercise/ex28_cute_dsl_toolchain/)
 29. [Does an MMA tile give bitwise-identical numerics when the result is offset?](cute_exercise/ex29_mma_offset_numerics/)
+30. [What are the TPC groupings on GB200?](cute_exercise/ex30_gb200_tpc_groupings/)
