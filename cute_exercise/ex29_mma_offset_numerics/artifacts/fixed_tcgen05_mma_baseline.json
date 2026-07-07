@@ -1,0 +1,18 @@
+{
+  "accumulator": "f32",
+  "comparison": {
+    "max_abs_err": 0.0,
+    "max_ulp": 0,
+    "same_bits": true
+  },
+  "correct": true,
+  "dtype": "bf16",
+  "kernel": "fixed_tcgen05_mma",
+  "note": "Fixed 128x128x128 CuTe tile compared against BF16 torch.mm.",
+  "seed": 0,
+  "shape": {
+    "k": 128,
+    "m": 128,
+    "n": 128
+  }
+}
