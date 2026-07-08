@@ -1,0 +1,150 @@
+{
+  "accumulator": "f32",
+  "baseline_row_row_transpose_comparison": {
+    "max_abs_err": 0.0,
+    "max_ulp": 0,
+    "same_bits": true
+  },
+  "dtype": "bf16",
+  "kernel": "custom_tcgen05_mma_ex21",
+  "question": "Compare A @ B.T with (B @ A.T).T for row/column source layouts.",
+  "results": [
+    {
+      "copied_a": false,
+      "copied_b": false,
+      "kernel_stride_a": [
+        64,
+        1
+      ],
+      "kernel_stride_b": [
+        64,
+        1
+      ],
+      "layout_a": "row",
+      "layout_b": "row",
+      "max_abs_err": 0.0,
+      "max_abs_err_vs_row_baseline": 0.0,
+      "max_ulp": 0,
+      "max_ulp_vs_row_baseline": 0,
+      "mma_major_mode_a": "K",
+      "mma_major_mode_b": "K",
+      "same_bits": true,
+      "same_bits_vs_row_baseline": true,
+      "source_stride_a": [
+        64,
+        1
+      ],
+      "source_stride_b": [
+        64,
+        1
+      ],
+      "suspected_cause": "same output bits"
+    },
+    {
+      "copied_a": false,
+      "copied_b": false,
+      "kernel_stride_a": [
+        64,
+        1
+      ],
+      "kernel_stride_b": [
+        1,
+        128
+      ],
+      "layout_a": "row",
+      "layout_b": "column",
+      "max_abs_err": 0.0,
+      "max_abs_err_vs_row_baseline": 0.0,
+      "max_ulp": 0,
+      "max_ulp_vs_row_baseline": 0,
+      "mma_major_mode_a": "K",
+      "mma_major_mode_b": "MN",
+      "same_bits": true,
+      "same_bits_vs_row_baseline": true,
+      "source_stride_a": [
+        64,
+        1
+      ],
+      "source_stride_b": [
+        1,
+        128
+      ],
+      "suspected_cause": "same output bits"
+    },
+    {
+      "copied_a": false,
+      "copied_b": false,
+      "kernel_stride_a": [
+        1,
+        128
+      ],
+      "kernel_stride_b": [
+        64,
+        1
+      ],
+      "layout_a": "column",
+      "layout_b": "row",
+      "max_abs_err": 0.0,
+      "max_abs_err_vs_row_baseline": 0.0,
+      "max_ulp": 0,
+      "max_ulp_vs_row_baseline": 0,
+      "mma_major_mode_a": "MN",
+      "mma_major_mode_b": "K",
+      "same_bits": true,
+      "same_bits_vs_row_baseline": true,
+      "source_stride_a": [
+        1,
+        128
+      ],
+      "source_stride_b": [
+        64,
+        1
+      ],
+      "suspected_cause": "same output bits"
+    },
+    {
+      "copied_a": false,
+      "copied_b": false,
+      "kernel_stride_a": [
+        1,
+        128
+      ],
+      "kernel_stride_b": [
+        1,
+        128
+      ],
+      "layout_a": "column",
+      "layout_b": "column",
+      "max_abs_err": 0.0,
+      "max_abs_err_vs_row_baseline": 0.0,
+      "max_ulp": 0,
+      "max_ulp_vs_row_baseline": 0,
+      "mma_major_mode_a": "MN",
+      "mma_major_mode_b": "MN",
+      "same_bits": true,
+      "same_bits_vs_row_baseline": true,
+      "source_stride_a": [
+        1,
+        128
+      ],
+      "source_stride_b": [
+        1,
+        128
+      ],
+      "suspected_cause": "same output bits"
+    }
+  ],
+  "seed": 0,
+  "shape": {
+    "k": 64,
+    "m": 128,
+    "n": 128
+  },
+  "summary": {
+    "cases": 4,
+    "max_abs_err": 0.0,
+    "max_ulp": 0,
+    "mismatch_layout_pairs": [],
+    "mismatches": 0
+  }
+}

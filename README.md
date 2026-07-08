@@ -61,3 +61,4 @@ subdirectory contains:
 28. [How do I inspect the embedded CuTe DSL CUDA compiler?](cute_exercise/ex28_cute_dsl_toolchain/)
 29. [Does an MMA tile give bitwise-identical numerics when the result is offset?](cute_exercise/ex29_mma_offset_numerics/)
 30. [What are the TPC groupings on GB200?](cute_exercise/ex30_gb200_tpc_groupings/)
+31. [Does transposing the MMA operand roles affect numerics?](cute_exercise/ex31_mma_transpose_numerics/)
