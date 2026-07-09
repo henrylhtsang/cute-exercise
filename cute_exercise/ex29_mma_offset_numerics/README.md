@@ -272,6 +272,109 @@ cute_exercise/ex29_mma_offset_numerics/artifacts/bf16_padded_m128_n128_k128_offs
   mismatch. The mismatch appears tied to the full `128 x 128` output tile in
   the larger padded GEMM.
 
+Follow-up: a scalar `False` assignment to CUDA's BF16 reduced-precision
+reduction flag did not remove the mismatch. On the same GB200 / Torch
+`2.11.0+cu130` environment, retrying the known sparse mismatches with:
+
+```python
+torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+```
+
+left both `(m0, n0) = (127, 127)` and `(128, 127)` mismatched at
+`max_abs_err = 4.76837158203125e-07` and `max_ulp = 2`. Comparing the flag-on
+and flag-off outputs directly also produced identical baseline bits and
+identical padded-GEMM bits for those cases, so this flag was not the source of
+the observed BF16 offset sensitivity. Repeating the same check in a fresh
+`cute-exercise` conda environment with Torch `2.13.0+cu130` reproduced the same
+result: the sparse sweep still had exactly those two mismatches with the same
+`max_abs_err` and `max_ulp`, and flag-on vs flag-off outputs were still
+bitwise-identical.
+
+The tuple form is different in Torch `2.13.0+cu130`:
+
+```python
+torch.backends.cuda.preferred_blas_library("cublaslt")
+torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (False, False)
+```
+
+Without forcing `cublaslt`, the tuple assignment failed on the first `torch.mm`
+with:
+
+```text
+RuntimeError: torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction(..., allow_splitk=False) requires the cuBLASLt backend
+```
+
+With `cublaslt` forced, the original two known mismatches `(127, 127)` and
+`(128, 127)` became bitwise-identical. The sparse sweep as a whole did not
+become bitwise-identical, though: it reported 58 mismatches, still with
+`max_abs_err = 4.76837158203125e-07` and `max_ulp = 2`, at a different set of
+offsets.
+
+#### Optional side quest: default cuBLAS kernel selection
+
+I used Nsight Compute on Torch `2.13.0+cu130` to compare the default cuBLAS
+path for the baseline GEMM and the two sparse mismatches. The profiling harness
+is:
+
+```text
+cute_exercise/ex29_mma_offset_numerics/profile_cublas_mm.py
+```
+
+Example capture:
+
+```bash
+ncu --profile-from-start off --target-processes all --set full \
+  --force-overwrite -o /tmp/ex29_cublas_padded_127_127 \
+  conda run -n cute-exercise python -m \
+  cute_exercise.ex29_mma_offset_numerics.profile_cublas_mm \
+  --case padded --m0 127 --n0 127 --backend cublas
+```
+
+NCU does not expose PTX for these closed cuBLAS kernels, but the kernel names
+and SASS instruction markers are enough to show an algorithm switch:
+
+```text
+case                  full GEMM shape  same bits?  kernel
+-------------------   ---------------  ----------  -----------------------------------------------
+baseline              128x128x128      yes         nvjet_sm100_tst_64x8_64x16_2x4_h_bz_NNT
+padded (127, 127)     255x255x128      no          cutlass_75_tensorop_bf16_s1688gemm_bf16_64x64
+padded (128, 127)     256x255x128      no          cutlass_75_tensorop_bf16_s1688gemm_bf16_64x64
+padded (127, 128)     255x256x128      yes         nvjet_sm100_tst_64x8_64x16_1x4_h_bz_NNT
+padded (128, 128)     256x256x128      yes         nvjet_sm100_tst_64x8_64x16_1x4_h_bz_NNT
+```
+
+Launch metadata:
+
+```text
+case                  grid  block  cluster  registers/thread  dynamic smem/block
+-------------------   ----  -----  -------  ----------------  ------------------
+baseline              32    256    8        255               156.17 KiB
+padded (127, 127)     16    128    0        96                16.38 KiB
+padded (128, 127)     16    128    0        96                16.38 KiB
+padded (127, 128)     128   256    4        255               156.17 KiB
+padded (128, 128)     128   256    4        255               156.17 KiB
+```
+
+SASS markers:
+
+```text
+nvjet path:
+  8 UTCHMMA
+  2 F2FP.BF16.F32.PACK_AB
+  STG.3D
+
+cutlass_75 fallback:
+  32 HMMA
+  64 F2FP.BF16.F32.PACK_AB
+  64 STG.E.U16
+```
+
+The mismatching `n0 = 127` cases therefore are not using the same Blackwell
+tensor-memory MMA path as the baseline. They fall back to a CUTLASS-style
+`64x64` BF16 tensorop kernel using warp-level `HMMA` and register accumulators.
+The bitwise difference is consistent with a different tile decomposition,
+accumulation schedule, and BF16 conversion/store epilogue.
+
 ### Custom `tcgen05` MMA
 
 The custom path uses a fixed-shape CuTe DSL launcher:
